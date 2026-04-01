@@ -7,7 +7,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 # ===== НАСТРОЙКИ =====
 TOKEN = "8660586485:AAG-m5LuMYPYSeq9H1IV9sAIgUHogRIzF44"
 MY_CHANNEL = "https://t.me/+xaluK6hROws0Zjdi"
-ADMIN_ID = 1546392669  # твой Telegram ID — замени на свой
+ADMIN_ID = 1546392669
 
 # ===== БАЗА ПОЛЬЗОВАТЕЛЕЙ =====
 USERS_FILE = "users.json"
@@ -46,19 +46,44 @@ logging.basicConfig(level=logging.INFO)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     add_user(user_id)
-
     keyboard = [
         [InlineKeyboardButton("📋 Получить список каналов", callback_data="get_list")],
         [InlineKeyboardButton("📊 Мой канал с прогнозами", url=MY_CHANNEL)],
         [InlineKeyboardButton("✉️ Написать мне", callback_data="feedback")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
         "👋 Доброго времени!\n\n"
         "Выбери что тебя интересует:",
         reply_markup=reply_markup
     )
+
+# ===== СТАТИСТИКА =====
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        return
+    users = load_users()
+    await update.message.reply_text(f"👥 В базе: {len(users)} пользователей")
+
+# ===== РАССЫЛКА =====
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Напиши текст после команды: /broadcast Привет всем!")
+        return
+    message = " ".join(context.args)
+    users = load_users()
+    success = 0
+    for uid in users:
+        try:
+            await context.bot.send_message(chat_id=uid, text=message)
+            success += 1
+        except:
+            pass
+    await update.message.reply_text(f"✅ Рассылка отправлена {success} пользователям")
 
 # ===== ОБРАБОТКА СООБЩЕНИЙ =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -66,31 +91,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user(user_id)
     text = update.message.text.lower().strip()
 
-    if user_id == ADMIN_ID and text.startswith("/broadcast "):
-        message = update.message.text[11:]
-        users = load_users()
-        success = 0
-        for uid in users:
-            try:
-                await context.bot.send_message(chat_id=uid, text=message)
-                success += 1
-            except:
-                pass
-        await update.message.reply_text(f"✅ Рассылка отправлена {success} пользователям")
-        return
-
-    if user_id == ADMIN_ID and text == "/stats":
-        users = load_users()
-        await update.message.reply_text(f"👥 В базе: {len(users)} пользователей")
-        return
-
     if "давай" in text:
         keyboard = [
             [InlineKeyboardButton("📊 Мой канал с прогнозами", url=MY_CHANNEL)],
             [InlineKeyboardButton("✉️ Написать мне", callback_data="feedback")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-
         await update.message.reply_text(
             CHANNELS_LIST,
             parse_mode="HTML",
@@ -104,7 +110,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("✉️ Написать мне", callback_data="feedback")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-
         await update.message.reply_text(
             "Напиши слово <b>давай</b> — и получишь список каналов 👇",
             parse_mode="HTML",
@@ -124,27 +129,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("✉️ Написать мне", callback_data="feedback")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-
         await query.message.reply_text(
             CHANNELS_LIST,
             parse_mode="HTML",
             reply_markup=reply_markup,
             disable_web_page_preview=True
         )
-
     elif query.data == "feedback":
-        await query.message.reply_text(
-            "✉️ Обратная связь: @vm_N17"
-        )
+        await query.message.reply_text("✉️ Обратная связь: @vm_N17")
 
 # ===== ЗАПУСК =====
 def main():
     app = Application.builder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
     print("Бот запущен...")
     app.run_polling()
 
