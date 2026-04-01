@@ -16,7 +16,7 @@ CHANNELS_LIST = """
 4. <a href="https://t.me/bc_pari">Pari</a>
 5. <a href="https://t.me/olimpbet">Olimpbet</a>
 
-⚠️ Помни: эти каналы публикуют прогнозы в своих интересах. Как читать их правильно — я объяснил в видео.
+⚠️ Помни: эти каналы публикуют прогнозы в своих интересах. Слепо брать каждый их прогноз в обратку — тоже ошибка. Как читать их правильно — я объяснил в видео.
 """
 
 logging.basicConfig(level=logging.INFO)
@@ -50,7 +50,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             CHANNELS_LIST,
             parse_mode="HTML",
-            reply_markup=reply_markup
+            reply_markup=reply_markup,
+            disable_web_page_preview=True
         )
     else:
         keyboard = [
@@ -81,7 +82,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             CHANNELS_LIST,
             parse_mode="HTML",
-            reply_markup=reply_markup
+            reply_markup=reply_markup,
+            disable_web_page_preview=True
         )
 
     elif query.data == "feedback":
