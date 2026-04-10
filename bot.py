@@ -1,6 +1,6 @@
 import logging
-import json
 import os
+import psycopg2
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
@@ -8,24 +8,52 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 TOKEN = "8660586485:AAG-m5LuMYPYSeq9H1IV9sAIgUHogRIzF44"
 MY_CHANNEL = "https://t.me/+xaluK6hROws0Zjdi"
 ADMIN_ID = 1546392669
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# ===== БАЗА ПОЛЬЗОВАТЕЛЕЙ =====
-USERS_FILE = "users.json"
+# ===== БАЗА ДАННЫХ =====
+def get_conn():
+    return psycopg2.connect(DATABASE_URL)
 
-def load_users():
-    if os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "r") as f:
-            return set(json.load(f))
-    return set()
-
-def save_users(users):
-    with open(USERS_FILE, "w") as f:
-        json.dump(list(users), f)
+def init_db():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY
+        )
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
 
 def add_user(user_id):
-    users = load_users()
-    users.add(user_id)
-    save_users(users)
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("INSERT INTO users (user_id) VALUES (%s) ON CONFLICT DO NOTHING", (user_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"DB error: {e}")
+
+def get_all_users():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM users")
+    users = [row[0] for row in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return users
+
+def count_users():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM users")
+    count = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+    return count
 
 # ===== ТЕКСТЫ =====
 CHANNELS_LIST = """
@@ -307,31 +335,26 @@ CLUB_TEXT = """Если ты уже следишь за каналом, ты и 
 
 logging.basicConfig(level=logging.INFO)
 
-def main_keyboard(channel_url):
+def main_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Статистика", callback_data="stats"),
          InlineKeyboardButton("🔒 Закрытый клуб", callback_data="club")],
-        [InlineKeyboardButton("📺 Мой канал с прогнозами", url=channel_url)],
+        [InlineKeyboardButton("📺 Мой канал с прогнозами", url=MY_CHANNEL)],
         [InlineKeyboardButton("✉️ Написать мне", callback_data="feedback")],
     ])
 
-# ===== СТАРТ =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    add_user(user_id)
+    add_user(update.effective_user.id)
     await update.message.reply_text(
         "👋 Доброго времени!\n\nВыбери что тебя интересует:",
-        reply_markup=main_keyboard(MY_CHANNEL)
+        reply_markup=main_keyboard()
     )
 
-# ===== СТАТИСТИКА АДМИНА =====
 async def stats_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    users = load_users()
-    await update.message.reply_text(f"👥 В базе: {len(users)} пользователей")
+    await update.message.reply_text(f"👥 В базе: {count_users()} пользователей")
 
-# ===== РАССЫЛКА ТЕКСТА =====
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -339,7 +362,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Используй: /broadcast Текст сообщения")
         return
     message = " ".join(context.args)
-    users = load_users()
+    users = get_all_users()
     success = 0
     for uid in users:
         try:
@@ -349,13 +372,12 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     await update.message.reply_text(f"✅ Рассылка отправлена {success} пользователям")
 
-# ===== РАССЫЛКА ФОТО =====
 async def broadcast_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     caption = update.message.caption or ""
     photo = update.message.photo[-1].file_id
-    users = load_users()
+    users = get_all_users()
     success = 0
     for uid in users:
         try:
@@ -365,55 +387,37 @@ async def broadcast_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     await update.message.reply_text(f"✅ Фото разослано {success} пользователям")
 
-# ===== ОБРАБОТКА СООБЩЕНИЙ =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    add_user(user_id)
+    add_user(update.effective_user.id)
     text = update.message.text.lower().strip()
-
     if "давай" in text:
         await update.message.reply_text(
             CHANNELS_LIST,
             parse_mode="HTML",
-            reply_markup=main_keyboard(MY_CHANNEL),
+            reply_markup=main_keyboard(),
             disable_web_page_preview=True
         )
     else:
         await update.message.reply_text(
             "Напиши слово <b>давай</b> — и получишь список каналов 👇",
             parse_mode="HTML",
-            reply_markup=main_keyboard(MY_CHANNEL)
+            reply_markup=main_keyboard()
         )
 
-# ===== КНОПКИ =====
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    user_id = query.from_user.id
-    add_user(user_id)
+    add_user(query.from_user.id)
     await query.answer()
 
     if query.data == "stats":
-        await query.message.reply_text(
-            STATS_TEXT,
-            parse_mode="HTML",
-            reply_markup=main_keyboard(MY_CHANNEL)
-        )
-
+        await query.message.reply_text(STATS_TEXT, parse_mode="HTML", reply_markup=main_keyboard())
     elif query.data == "club":
-        await query.message.reply_text(
-            CLUB_TEXT,
-            parse_mode="HTML",
-            reply_markup=main_keyboard(MY_CHANNEL)
-        )
-
+        await query.message.reply_text(CLUB_TEXT, parse_mode="HTML", reply_markup=main_keyboard())
     elif query.data == "feedback":
-        await query.message.reply_text(
-            "✉️ Обратная связь: @vm_N17",
-            reply_markup=main_keyboard(MY_CHANNEL)
-        )
+        await query.message.reply_text("✉️ Обратная связь: @vm_N17", reply_markup=main_keyboard())
 
-# ===== ЗАПУСК =====
 def main():
+    init_db()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats_admin))
