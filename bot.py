@@ -27,7 +27,7 @@ def add_user(user_id):
     users.add(user_id)
     save_users(users)
 
-# ===== СПИСОК КАНАЛОВ БУКМЕКЕРОВ =====
+# ===== ТЕКСТЫ =====
 CHANNELS_LIST = """
 📋 <b>Каналы букмекеров — читай наоборот:</b>
 
@@ -40,6 +40,49 @@ CHANNELS_LIST = """
 ⚠️ Помни: эти каналы публикуют прогнозы в своих интересах. Слепо брать каждый их прогноз в обратку — тоже ошибка. Как читать их правильно — я объяснил в видео.
 """
 
+STATS_TEXT = """
+📊 <b>Итог за 8 месяцев</b>
+
+💰 Чистая прибыль: <b>+751,000₽ (+150.20%)</b>
+🏦 Банк: 500,000₽
+
+📅 По месяцам:
+• июль–август: +124,500₽ (+24.90%) ✅
+• август–сентябрь: +88,000₽ (+28.60%) ✅
+• сентябрь–октябрь: +61,000₽ (+12.20%) ✅
+• октябрь–ноябрь: +291,650₽ (+58.33%) ✅
+• ноябрь–декабрь: +167,700₽ (+33.54%) ✅
+• декабрь–январь: +8,200₽ (+1.64%) ✅
+• январь–февраль: +34,900₽ (+6.98%) ✅
+• февраль–март: -24,950₽ (-4.99%) ❌
+
+Каждая ставка — в открытом доступе. Никаких догонов. 7 из 8 месяцев в плюсе.
+"""
+
+CLUB_TEXT = """
+🔒 <b>Закрытый клуб</b>
+
+Если ты уже следишь за каналом, ты и сам видишь мой подход, логику и то, как я работаю.
+
+Закрытый клуб — это формат для тех, кто хочет быть внутри всей этой системы, а не просто наблюдать со стороны.
+
+<b>Что получает каждый участник:</b>
+• ставки с полной аналитикой
+• закрытый чат единомышленников
+• рекомендации по банку и психологии беттинга
+• все платные услуги: одиночки, экспрессы, марафоны, комбо
+
+💰 <b>Стоимость:</b>
+Бессрочно — 100,000₽ (1270$)
+1 год — 49,000₽ (625$)
+1 месяц — 19,000₽ (245$)
+1 неделя — 9,000₽ (115$)
+
+Годовой доступ — менее 130₽ в день за полный доступ ко всей системе.
+
+Для вступления: @vm_N17 🤝
+"""
+
 logging.basicConfig(level=logging.INFO)
 
 # ===== СТАРТ =====
@@ -47,8 +90,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     add_user(user_id)
     keyboard = [
-        [InlineKeyboardButton("📋 Получить список каналов", callback_data="get_list")],
-        [InlineKeyboardButton("📊 Мой канал с прогнозами", url=MY_CHANNEL)],
+        [InlineKeyboardButton("📊 Статистика", callback_data="stats"),
+         InlineKeyboardButton("🔒 Закрытый клуб", callback_data="club")],
+        [InlineKeyboardButton("📺 Мой канал с прогнозами", url=MY_CHANNEL)],
         [InlineKeyboardButton("✉️ Написать мне", callback_data="feedback")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -70,11 +114,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     if not context.args:
-        await update.message.reply_text(
-            "Используй так:\n"
-            "/broadcast Текст сообщения\n\n"
-            "Или отправь фото с подписью — я разошлю всем."
-        )
+        await update.message.reply_text("Используй: /broadcast Текст сообщения")
         return
     message = " ".join(context.args)
     users = load_users()
@@ -111,7 +151,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if "давай" in text:
         keyboard = [
-            [InlineKeyboardButton("📊 Мой канал с прогнозами", url=MY_CHANNEL)],
+            [InlineKeyboardButton("📊 Статистика", callback_data="stats"),
+             InlineKeyboardButton("🔒 Закрытый клуб", callback_data="club")],
+            [InlineKeyboardButton("📺 Мой канал с прогнозами", url=MY_CHANNEL)],
             [InlineKeyboardButton("✉️ Написать мне", callback_data="feedback")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -123,8 +165,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         keyboard = [
-            [InlineKeyboardButton("📋 Получить список каналов", callback_data="get_list")],
-            [InlineKeyboardButton("📊 Мой канал с прогнозами", url=MY_CHANNEL)],
+            [InlineKeyboardButton("📊 Статистика", callback_data="stats"),
+             InlineKeyboardButton("🔒 Закрытый клуб", callback_data="club")],
+            [InlineKeyboardButton("📺 Мой канал с прогнозами", url=MY_CHANNEL)],
             [InlineKeyboardButton("✉️ Написать мне", callback_data="feedback")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -141,18 +184,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user(user_id)
     await query.answer()
 
-    if query.data == "get_list":
-        keyboard = [
-            [InlineKeyboardButton("📊 Мой канал с прогнозами", url=MY_CHANNEL)],
-            [InlineKeyboardButton("✉️ Написать мне", callback_data="feedback")],
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+    if query.data == "stats":
         await query.message.reply_text(
-            CHANNELS_LIST,
-            parse_mode="HTML",
-            reply_markup=reply_markup,
-            disable_web_page_preview=True
+            STATS_TEXT,
+            parse_mode="HTML"
         )
+
+    elif query.data == "club":
+        await query.message.reply_text(
+            CLUB_TEXT,
+            parse_mode="HTML"
+        )
+
     elif query.data == "feedback":
         await query.message.reply_text("✉️ Обратная связь: @vm_N17")
 
