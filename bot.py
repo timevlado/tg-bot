@@ -73,7 +73,7 @@ STATS_TEXT = """🗓С 11 июля по 11 августа
 2.68 ✅ 4%
 1.72 ❌ 2%
 2.55 ✅ 2%
-👉Чистая прибыль +124,500₽ (+24.90%)
+👉 <b>Чистая прибыль +124,500₽ (+24.90%)</b>
 
 
 🗓С 11 августа по 11 сентября
@@ -97,7 +97,7 @@ STATS_TEXT = """🗓С 11 июля по 11 августа
 2.10 ✅ 1%
 1.67 ❌ 1%
 1.62 ✅ 2%
-👉 Чистая прибыль +88,000₽ (+28.60%)
+👉 <b>Чистая прибыль +88,000₽ (+28.60%)</b>
 
 
 🗓С 11 сентября по 11 октября
@@ -132,7 +132,7 @@ STATS_TEXT = """🗓С 11 июля по 11 августа
 20.44 ❌ 1%
 1.60 ✅ 2%
 1.67 ❌ 2%
-👉Чистая прибыль +61,000₽ (+12.20%)
+👉 <b>Чистая прибыль +61,000₽ (+12.20%)</b>
 
 
 🗓С 11 октября по 11 ноября 
@@ -166,7 +166,7 @@ STATS_TEXT = """🗓С 11 июля по 11 августа
 1.85 ✅ 2%
 1.70 ✅ 3%
 2.40 ❌ 2%
-👉 Чистая прибыль +291,650₽ (+58.33%)
+👉 <b>Чистая прибыль +291,650₽ (+58.33%)</b>
 
 
 🗓С 11 ноября по 11 декабря 
@@ -192,7 +192,7 @@ STATS_TEXT = """🗓С 11 июля по 11 августа
 2.65 ✅ 4%
 1.90 ✅ 4%
 2.65 ✅ 2%
-👉 Чистая прибыль +167,700₽ (+33.54%)
+👉 <b>Чистая прибыль +167,700₽ (+33.54%)</b>
 
 
 🗓С 11 декабря по 11 января 
@@ -215,7 +215,7 @@ STATS_TEXT = """🗓С 11 июля по 11 августа
 1.66 ❌ 2%
 1.88 ✅ 2%
 1.42 ✅ 2%
-👉Чистая прибыль +8,200₽ (+1.64%)
+👉 <b>Чистая прибыль +8,200₽ (+1.64%)</b>
 
 
 🗓С 11 января по 11 февраля
@@ -240,7 +240,7 @@ STATS_TEXT = """🗓С 11 июля по 11 августа
 1.85 ✅ 2% 
 1.93 ❌ 2% 
 1.50 ✅ 1%
-👉Чистая прибыль +34,900₽ (+6.98%)
+👉 <b>Чистая прибыль +34,900₽ (+6.98%)</b>
 
 
 🗓С 11 февраля по 11 марта
@@ -266,62 +266,62 @@ STATS_TEXT = """🗓С 11 июля по 11 августа
 1.74 ✅ 3%
 1.76 ❌ 2%
 1.55 ✅ 2%
-👉Чистый убыток -24,950₽ (-4.99%)
+👉 <b>Чистый убыток -24,950₽ (-4.99%)</b>
 
 🗓С 11 марта по 11 апреля
 Заполняю… ✍️ 
 
 
-🧮 ИТОГ ЗА 8 МЕСЯЦЕВ: 
-Чистая прибыль +751,000₽ (+150.20%)
+🧮 <b>ИТОГ ЗА 8 МЕСЯЦЕВ:</b> 
+<b>Чистая прибыль +751,000₽ (+150.20%)</b>
 
 Каждая ставка - в открытом доступе. Никаких догонов, которые убивают банк! Да, людям проще увидеть один минус и забыть работу за пол года. Так устроена психология большинства. Но если вы смотрите шире, чем один день - вы увидите, какой колоссальный объём работы я делаю."""
 
 CLUB_TEXT = """Если ты уже следишь за каналом, ты и сам видишь мой подход, логику и то, как я работаю.
 
-Закрытый клуб - это формат для тех, кто хочет быть внутри всей этой системы, а не просто наблюдать со стороны.
+<b>Закрытый клуб</b> - это формат для тех, кто хочет быть внутри всей этой системы, а не просто наблюдать со стороны.
 
-Что получает каждый участник закрытого клуба ❓
+<b>Что получает каждый участник закрытого клуба ❓</b>
 
 - ставки с полной аналитикой;
 - закрытый чат единомышленников;
 - рекомендации по распределению банка и советы по психологии беттинга;
- 
+
 ➕ все платные услуги автоматически попадают в закрытый клуб (одиночки, экспрессы, марафоны, комбо и тд);
 
-💰Стоимость:
-Бессрочно 100.000₽ (1270$)
-1 год 49.000₽ (625$)
-1 месяц 19.000₽ (245$)
-1 неделя 9.000₽ (115$)
+<b>💰Стоимость:</b>
+Бессрочно <b>100.000₽</b> (1270$)
+1 год <b>49.000₽</b> (625$)
+1 месяц <b>19.000₽</b> (245$)
+1 неделя <b>9.000₽</b> (115$)
 
-Почему выгодно ❓
+<b>Почему выгодно ❓</b>
 
 Приобретая доступ на 1 месяц, вы получаете все материалы менее чем за 500₽ (6$) в день.
 
 Если смотреть на дистанции, годовой доступ - это самый выгодный формат: меньше 130₽ (1.5$) в день за полный доступ ко всей системе.
 
-Для вступления: лс @vm_N17
+<b>Для вступления: лс @vm_N17</b>
 
 Добро пожаловать в клуб 🤝"""
 
 logging.basicConfig(level=logging.INFO)
 
+def main_keyboard(channel_url):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Статистика", callback_data="stats"),
+         InlineKeyboardButton("🔒 Закрытый клуб", callback_data="club")],
+        [InlineKeyboardButton("📺 Мой канал с прогнозами", url=channel_url)],
+        [InlineKeyboardButton("✉️ Написать мне", callback_data="feedback")],
+    ])
+
 # ===== СТАРТ =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     add_user(user_id)
-    keyboard = [
-        [InlineKeyboardButton("📊 Статистика", callback_data="stats"),
-         InlineKeyboardButton("🔒 Закрытый клуб", callback_data="club")],
-        [InlineKeyboardButton("📺 Мой канал с прогнозами", url=MY_CHANNEL)],
-        [InlineKeyboardButton("✉️ Написать мне", callback_data="feedback")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "👋 Доброго времени!\n\n"
-        "Выбери что тебя интересует:",
-        reply_markup=reply_markup
+        "👋 Доброго времени!\n\nВыбери что тебя интересует:",
+        reply_markup=main_keyboard(MY_CHANNEL)
     )
 
 # ===== СТАТИСТИКА АДМИНА =====
@@ -371,26 +371,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user(user_id)
     text = update.message.text.lower().strip()
 
-    keyboard = [
-        [InlineKeyboardButton("📊 Статистика", callback_data="stats"),
-         InlineKeyboardButton("🔒 Закрытый клуб", callback_data="club")],
-        [InlineKeyboardButton("📺 Мой канал с прогнозами", url=MY_CHANNEL)],
-        [InlineKeyboardButton("✉️ Написать мне", callback_data="feedback")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     if "давай" in text:
         await update.message.reply_text(
             CHANNELS_LIST,
             parse_mode="HTML",
-            reply_markup=reply_markup,
+            reply_markup=main_keyboard(MY_CHANNEL),
             disable_web_page_preview=True
         )
     else:
         await update.message.reply_text(
             "Напиши слово <b>давай</b> — и получишь список каналов 👇",
             parse_mode="HTML",
-            reply_markup=reply_markup
+            reply_markup=main_keyboard(MY_CHANNEL)
         )
 
 # ===== КНОПКИ =====
@@ -401,13 +393,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "stats":
-        await query.message.reply_text(STATS_TEXT)
+        await query.message.reply_text(
+            STATS_TEXT,
+            parse_mode="HTML",
+            reply_markup=main_keyboard(MY_CHANNEL)
+        )
 
     elif query.data == "club":
-        await query.message.reply_text(CLUB_TEXT)
+        await query.message.reply_text(
+            CLUB_TEXT,
+            parse_mode="HTML",
+            reply_markup=main_keyboard(MY_CHANNEL)
+        )
 
     elif query.data == "feedback":
-        await query.message.reply_text("✉️ Обратная связь: @vm_N17")
+        await query.message.reply_text(
+            "✉️ Обратная связь: @vm_N17",
+            reply_markup=main_keyboard(MY_CHANNEL)
+        )
 
 # ===== ЗАПУСК =====
 def main():
