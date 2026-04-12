@@ -337,10 +337,11 @@ logging.basicConfig(level=logging.INFO)
 
 def main_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Статистика", callback_data="stats"),
-         InlineKeyboardButton("🔒 Закрытый клуб", callback_data="club")],
-        [InlineKeyboardButton("📺 Мой канал с прогнозами", url=MY_CHANNEL)],
-        [InlineKeyboardButton("✉️ Написать мне", callback_data="feedback")],
+        [InlineKeyboardButton("📱 Влад Морозов | Канал", url="https://t.me/vladmorozov_tv")],
+        [InlineKeyboardButton("🎯 Прогнозы", url=MY_CHANNEL),
+         InlineKeyboardButton("📊 Статистика", callback_data="stats")],
+        [InlineKeyboardButton("💎 Доступ в закрытый клуб", callback_data="club")],
+        [InlineKeyboardButton("✉️ Обратная связь", url="https://t.me/vm_N17")],
     ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
