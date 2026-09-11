@@ -108,7 +108,6 @@ logging.basicConfig(level=logging.INFO)
 def main_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔥 Оформить подписку", callback_data="pay")],
-        [InlineKeyboardButton("📸 Отправить скриншот", url=f"https://t.me/{CONTACT}")],
         [InlineKeyboardButton("↗️ Служба заботы", url=f"https://t.me/{CONTACT}")],
     ])
 
