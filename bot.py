@@ -145,6 +145,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "pay":
+        # Уведомляем админа о тёплом клиенте
+        user = query.from_user
+        username = f"@{user.username}" if user.username else "нет username"
+        name = user.full_name or "без имени"
+        notify_text = (
+            f"🔔 <b>Новый интерес к подписке!</b>\n\n"
+            f"Имя: {name}\n"
+            f"Username: {username}\n"
+            f"ID: <code>{user.id}</code>"
+        )
+        try:
+            await context.bot.send_message(chat_id=ADMIN_ID, text=notify_text, parse_mode="HTML")
+        except Exception as e:
+            print(f"Не удалось отправить уведомление админу: {e}")
+
         await query.message.reply_text(
             PAYMENT_TEXT,
             parse_mode="HTML",
