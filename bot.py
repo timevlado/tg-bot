@@ -175,6 +175,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ===== АДМИН: статистика и рассылки =====
+async def help_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    help_text = (
+        "🛠 <b>Команды админа</b>\n\n"
+        "/stats — сколько людей в базе бота\n\n"
+        "/broadcast <i>текст</i> — разослать текст всем пользователям\n"
+        "Пример: <code>/broadcast Завтра стрим в 20:00</code>\n\n"
+        "📸 Чтобы разослать фото всем — просто пришли фото сюда с подписью.\n\n"
+        "🔔 Когда кто-то нажимает «Оформить подписку» — тебе придёт уведомление с его данными."
+    )
+    await update.message.reply_text(help_text, parse_mode="HTML")
+
 async def stats_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -223,6 +236,7 @@ def main():
     init_db()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_admin))
     app.add_handler(CommandHandler("stats", stats_admin))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(MessageHandler(filters.PHOTO & filters.User(ADMIN_ID), broadcast_photo))
