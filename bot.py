@@ -17,16 +17,20 @@ def get_conn():
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY
-        )
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY
+            )
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("База данных готова.")
+    except Exception as e:
+        print(f"Не удалось подключиться к базе при старте (бот продолжит работу): {e}")
 
 def add_user(user_id):
     try:
@@ -40,22 +44,30 @@ def add_user(user_id):
         print(f"DB error: {e}")
 
 def get_all_users():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT user_id FROM users")
-    users = [row[0] for row in cur.fetchall()]
-    cur.close()
-    conn.close()
-    return users
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users")
+        users = [row[0] for row in cur.fetchall()]
+        cur.close()
+        conn.close()
+        return users
+    except Exception as e:
+        print(f"DB error (get_all_users): {e}")
+        return []
 
 def count_users():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM users")
-    count = cur.fetchone()[0]
-    cur.close()
-    conn.close()
-    return count
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM users")
+        count = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        return count
+    except Exception as e:
+        print(f"DB error (count_users): {e}")
+        return 0
 
 # ===== ТЕКСТЫ =====
 WELCOME_TEXT = """<b>Ты в одном шаге от входа в клуб «СВОИ»</b>
