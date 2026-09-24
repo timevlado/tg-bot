@@ -103,17 +103,23 @@ WELCOME_TEXT = """<b>Ты в одном шаге от входа в клуб «�
 
 💰 <b>Стоимость — 3 000 ₽ в месяц.</b>"""
 
-PAYMENT_TEXT = """💳 <b>Стоимость подписки</b>
+OFFER_URL = "https://telegra.ph/Publichnaya-oferta--Klub-SVOI-09-24"
 
-🇷🇺 <b>Для РФ — 3 000 ₽</b>
-Т-Банк: <code>2200700176771334</code>
+PAYMENT_TEXT = f"""💳 <b>Стоимость: 3 000 ₽ / 30 дней</b>
+Формат: ежемесячная подписка. Отписаться можно в любой момент.
 
-🌎 <b>Для других стран — $35</b>
-Freedom bank: <code>4002890062233725</code>
+<i>Нажимая «Оплатить картой РФ» или «Оплатить картой не РФ», вы принимаете условия <a href="{OFFER_URL}">публичной оферты</a>.</i>
 
-Оплата криптой — по запросу.
+⏳ Доступ в клуб откроется в течение нескольких минут после оплаты.
 
-После оплаты отправьте скриншот 👇"""
+Выберите способ оплаты 👇"""
+
+# Пока Робокасса не подключена: оплата через Службу заботы
+PAY_MANUAL_TEXT = """Чтобы оплатить, напишите в Службу заботы 👇
+
+Пришлём реквизиты и откроем доступ в клуб сразу после оплаты."""
+
+
 
 logging.basicConfig(level=logging.INFO)
 
@@ -125,10 +131,28 @@ def main_keyboard():
 
 def payment_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📸 Отправить скриншот", url=f"https://t.me/{CONTACT}")],
+        [InlineKeyboardButton("💳 Оплатить картой РФ", callback_data="pay_rf")],
+        [InlineKeyboardButton("🌍 Оплатить картой не РФ", callback_data="pay_foreign")],
         [InlineKeyboardButton("↗️ Служба заботы", url=f"https://t.me/{CONTACT}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
     ])
+
+def support_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("↗️ Служба заботы", url=f"https://t.me/{CONTACT}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="pay")],
+    ])
+
+def user_info(user):
+    username = f"@{user.username}" if user.username else "нет username"
+    name = user.full_name or "без имени"
+    return f"Имя: {name}\nUsername: {username}\nID: <code>{user.id}</code>"
+
+async def notify_admin(context, text):
+    try:
+        await context.bot.send_message(chat_id=ADMIN_ID, text=text, parse_mode="HTML")
+    except Exception as e:
+        print(f"Не удалось отправить уведомление админу: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user(update.effective_user.id)
@@ -143,27 +167,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     add_user(query.from_user.id)
     await query.answer()
+    user = query.from_user
 
     if query.data == "pay":
-        # Уведомляем админа о тёплом клиенте
-        user = query.from_user
-        username = f"@{user.username}" if user.username else "нет username"
-        name = user.full_name or "без имени"
-        notify_text = (
-            f"🔔 <b>Новый интерес к подписке!</b>\n\n"
-            f"Имя: {name}\n"
-            f"Username: {username}\n"
-            f"ID: <code>{user.id}</code>"
-        )
-        try:
-            await context.bot.send_message(chat_id=ADMIN_ID, text=notify_text, parse_mode="HTML")
-        except Exception as e:
-            print(f"Не удалось отправить уведомление админу: {e}")
-
+        await notify_admin(context, f"🔔 <b>Новый интерес к подписке!</b>\n\n{user_info(user)}")
         await query.message.reply_text(
             PAYMENT_TEXT,
             parse_mode="HTML",
             reply_markup=payment_keyboard(),
+            disable_web_page_preview=True
+        )
+    elif query.data in ("pay_rf", "pay_foreign"):
+        method = "картой РФ" if query.data == "pay_rf" else "картой не РФ"
+        await notify_admin(context, f"🔥 <b>Хочет оплатить {method}!</b>\n\n{user_info(user)}")
+        await query.message.reply_text(
+            PAY_MANUAL_TEXT,
+            parse_mode="HTML",
+            reply_markup=support_keyboard(),
             disable_web_page_preview=True
         )
     elif query.data == "back":
@@ -184,7 +204,8 @@ async def help_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/broadcast <i>текст</i> — разослать текст всем пользователям\n"
         "Пример: <code>/broadcast Завтра стрим в 20:00</code>\n\n"
         "📸 Чтобы разослать фото всем — просто пришли фото сюда с подписью.\n\n"
-        "🔔 Когда кто-то нажимает «Оформить подписку» — тебе придёт уведомление с его данными."
+        "🔔 Когда кто-то нажимает «Оформить подписку» — тебе придёт уведомление с его данными.\n"
+        "🔥 Когда кто-то нажимает «Оплатить картой РФ / не РФ» — придёт уведомление, что он готов платить. Напиши ему первым."
     )
     await update.message.reply_text(help_text, parse_mode="HTML")
 
