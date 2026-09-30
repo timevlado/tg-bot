@@ -22,8 +22,10 @@ CONTACT = "vm_N17"  # Служба заботы (без @)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # Робокасса
-RK_LOGIN = os.environ.get("ROBOKASSA_LOGIN", "club_svoi")
+RK_LOGIN = os.environ.get("ROBOKASSA_LOGIN", "club_svoi").strip()
 RK_TEST = os.environ.get("ROBOKASSA_TEST_MODE", "1").strip() == "1"
+# Автосписания: 1 — включены (после одобрения Робокассой), 0 — человек продлевает сам по напоминанию
+RK_RECURRING = os.environ.get("ROBOKASSA_RECURRING", "0").strip() == "1"
 RK_PASS1 = os.environ.get("ROBOKASSA_PASS1", "").strip()
 RK_PASS2 = os.environ.get("ROBOKASSA_PASS2", "").strip()
 RK_TEST_PASS1 = os.environ.get("ROBOKASSA_TEST_PASS1", "").strip()
@@ -207,9 +209,10 @@ def payment_link(user_id):
         "Description": DESCRIPTION,
         "Receipt": receipt,           # urlencode закодирует его ещё раз — так требует Робокасса
         "SignatureValue": signature,
-        "Recurring": "true",          # разрешаем последующие автосписания
         "Culture": "ru",
     }
+    if RK_RECURRING:
+        params["Recurring"] = "true"  # разрешаем последующие автосписания
     if RK_TEST:
         params["IsTest"] = "1"
     return f"{RK_PAY_URL}?{urlencode(params)}"
@@ -240,7 +243,7 @@ def club_chats():
     return [c for c in (CLUB_CHANNEL_ID, CLUB_CHAT_ID) if c]
 
 
-async def grant_access(bot, user_id, paid_until, first_payment):
+async def grant_access(bot, user_id, paid_until, first_payment, auto_renew=False):
     """Открывает доступ: снимает старый бан и присылает одноразовую ссылку в канал."""
     for chat in club_chats():
         try:
@@ -265,8 +268,11 @@ async def grant_access(bot, user_id, paid_until, first_payment):
         text = (
             "🎉 <b>Оплата прошла! Добро пожаловать в Клуб «СВОИ»</b>\n\n"
             f"Подписка активна до <b>{fmt_date(paid_until)}</b>.\n"
-            "Автопродление включено — управлять им можно в разделе «👤 Моя подписка».\n\n"
         )
+        if auto_renew:
+            text += "Автопродление включено — управлять им можно в разделе «👤 Моя подписка».\n\n"
+        else:
+            text += "За день до окончания пришлём напоминание со ссылкой на продление.\n\n"
         if invite:
             text += "Ссылка-приглашение ниже одноразовая и действует 24 часа 👇"
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚪 Войти в клуб", url=invite)]])
@@ -285,6 +291,8 @@ async def grant_access(bot, user_id, paid_until, first_payment):
 
 async def revoke_access(bot, user_id):
     """Удаляет из канала и чата (бан + сразу разбан = просто исключение)."""
+    if user_id == ADMIN_ID:
+        return  # владельца клуба не трогаем
     for chat in club_chats():
         try:
             await bot.ban_chat_member(chat_id=int(chat), user_id=user_id)
@@ -355,18 +363,29 @@ async def robokassa_result(request):
     db("UPDATE payments SET status = 'paid', paid_at = now() WHERE inv_id = %s", (int(inv_id),))
 
     bot = request.app["bot"]
-    first = kind == "initial"
-    if first:
-        paid_until = extend_subscription(user_id, first_inv_id=int(inv_id), auto_renew=True)
+    was_active = is_active(user_id)
+    if kind == "initial":
+        paid_until = extend_subscription(
+            user_id,
+            first_inv_id=int(inv_id) if RK_RECURRING else None,
+            auto_renew=True if RK_RECURRING else None,
+        )
     else:
         paid_until = extend_subscription(user_id)
+    sub = get_sub(user_id) or {}
 
     try:
-        await grant_access(bot, user_id, paid_until, first_payment=first)
+        await grant_access(bot, user_id, paid_until, first_payment=not was_active,
+                           auto_renew=bool(sub.get("auto_renew") and sub.get("first_inv_id")))
     except Exception as e:
         log.error("grant_access %s: %s", user_id, e)
 
-    label = "💰 Новая оплата" if first else "🔁 Автопродление"
+    if kind == "recurring":
+        label = "🔁 Автопродление"
+    elif was_active:
+        label = "🔁 Продление вручную"
+    else:
+        label = "💰 Новая оплата"
     test_mark = " (ТЕСТ)" if is_test else ""
     await notify_admin_bot(
         bot,
@@ -393,22 +412,36 @@ async def billing_loop(bot):
 async def billing_tick(bot):
     now = now_utc()
 
-    # 1. Напоминание за сутки до автосписания
+    # 1. Напоминание за сутки до окончания периода
     rows = db(
-        "SELECT user_id, paid_until FROM subscriptions WHERE status = 'active' AND auto_renew "
-        "AND first_inv_id IS NOT NULL AND paid_until > %s AND paid_until <= %s "
+        "SELECT user_id, paid_until, auto_renew AND first_inv_id IS NOT NULL FROM subscriptions "
+        "WHERE status = 'active' AND paid_until > %s AND paid_until <= %s "
         "AND (reminded_for IS NULL OR reminded_for <> paid_until)",
         (now, now + timedelta(days=1)), fetch="all",
     )
-    for user_id, paid_until in rows:
+    for user_id, paid_until, auto in rows:
         db("UPDATE subscriptions SET reminded_for = paid_until WHERE user_id = %s", (user_id,))
+        if user_id == ADMIN_ID:
+            continue
         try:
-            await bot.send_message(
-                user_id,
-                f"🔔 Завтра ({fmt_date(paid_until)}) подписка на Клуб «СВОИ» продлится автоматически: "
-                "спишется 3 000 ₽ за следующие 30 дней.\n\n"
-                "Отключить автопродление можно в разделе «👤 Моя подписка» (/start).",
-            )
+            if auto:
+                await bot.send_message(
+                    user_id,
+                    f"🔔 Завтра ({fmt_date(paid_until)}) подписка на Клуб «СВОИ» продлится автоматически: "
+                    "спишется 3 000 ₽ за следующие 30 дней.\n\n"
+                    "Отключить автопродление можно в разделе «👤 Моя подписка» (/start).",
+                )
+            else:
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💳 Продлить картой РФ", url=payment_link(user_id))],
+                    [InlineKeyboardButton("🌍 Продлить картой не РФ", callback_data="pay_foreign")],
+                ])
+                await bot.send_message(
+                    user_id,
+                    f"🔔 Подписка на Клуб «СВОИ» заканчивается {fmt_date(paid_until)}.\n\n"
+                    "Чтобы остаться в клубе, продлите её — 3 000 ₽ за следующие 30 дней 👇",
+                    reply_markup=kb,
+                )
         except Exception as e:
             log.warning("reminder %s: %s", user_id, e)
 
@@ -557,7 +590,8 @@ def my_sub_view(user_id):
             text += "Автопродление: <b>выключено</b> — доступ закроется в дату окончания."
             rows.append([InlineKeyboardButton("▶️ Включить автопродление", callback_data="renew_on")])
     else:
-        text += "Автопродления нет — оплата вручную через Службу заботы."
+        text += "Автопродления нет — за день до окончания пришлём напоминание."
+        rows.append([InlineKeyboardButton("💳 Продлить подписку", callback_data="pay")])
     rows.append([InlineKeyboardButton("↗️ Служба заботы", url=f"https://t.me/{CONTACT}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
     return text, InlineKeyboardMarkup(rows)
@@ -651,6 +685,7 @@ async def help_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🆔 Узнать ID канала: перешли сюда любой пост из канала.\n"
         "🆔 Узнать ID чата: напиши в чате <code>/chatid</code>\n\n"
         f"Режим оплаты: {mode}\n"
+        f"Автосписания: {'✅ включены' if RK_RECURRING else '⏸ выключены (продление по напоминанию)'}\n"
         f"Канал: {CLUB_CHANNEL_ID or '❌ не задан'}\n"
         f"Чат: {CLUB_CHAT_ID or '❌ не задан'}"
     )
