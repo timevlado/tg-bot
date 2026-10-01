@@ -682,6 +682,7 @@ async def help_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/grant <i>ID дней</i> — выдать доступ вручную (оплата картой не РФ)\n"
         "Пример: <code>/grant 123456789 30</code>\n"
         "/revoke <i>ID</i> — закрыть доступ и удалить из клуба\n\n"
+        "/msg <i>ID текст</i> — написать клиенту от имени бота (если у него нет username)\n\n"
         "🆔 Узнать ID канала: перешли сюда любой пост из канала.\n"
         "🆔 Узнать ID чата: напиши в чате <code>/chatid</code>\n\n"
         f"Режим оплаты: {mode}\n"
@@ -728,6 +729,24 @@ async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db("UPDATE subscriptions SET status = 'expired', auto_renew = FALSE WHERE user_id = %s", (user_id,))
     await revoke_access(context.bot, user_id)
     await update.message.reply_text("⏹ Доступ закрыт.")
+
+
+async def msg_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Написать клиенту от имени бота: /msg ID текст"""
+    if not is_admin(update):
+        return
+    try:
+        user_id = int(context.args[0])
+        text = update.message.text.split(maxsplit=2)[2]
+    except (IndexError, ValueError):
+        await update.message.reply_text("Используй: /msg ID текст\nПример: /msg 123456789 Привет! Ссылка в клуб выше 👆")
+        return
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("↗️ Ответить в Службу заботы", url=f"https://t.me/{CONTACT}")]])
+    try:
+        await context.bot.send_message(user_id, text, reply_markup=kb)
+        await update.message.reply_text("✅ Сообщение отправлено.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Не отправилось: {e}")
 
 
 async def chatid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -814,6 +833,7 @@ def main():
     app.add_handler(CommandHandler("broadcast", broadcast, filters=private))
     app.add_handler(CommandHandler("grant", grant_cmd, filters=private))
     app.add_handler(CommandHandler("revoke", revoke_cmd, filters=private))
+    app.add_handler(CommandHandler("msg", msg_cmd, filters=private))
     app.add_handler(CommandHandler("chatid", chatid_cmd))
     # Пересланный пост из канала — показать ID (ставим раньше рассылки фото!)
     app.add_handler(MessageHandler(private & admin & filters.FORWARDED, forwarded_from_channel))
