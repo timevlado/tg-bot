@@ -433,7 +433,7 @@ async def billing_tick(bot):
                 )
             else:
                 kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💳 Продлить картой РФ", url=payment_link(user_id))],
+                    [InlineKeyboardButton("💳 Продлить картой РФ / РБ", url=payment_link(user_id))],
                     [InlineKeyboardButton("🌍 Продлить картой не РФ", callback_data="pay_foreign")],
                 ])
                 await bot.send_message(
@@ -515,14 +515,14 @@ WELCOME_TEXT = """<b>Ты в одном шаге от входа в клуб «�
 <b>И это только начало.</b>
 Клуб будет постепенно развиваться и дополняться новыми материалами, возможностями и инструментами.
 
-💰 <b>Стоимость — 3 000 ₽ в месяц.</b>"""
+💰 <b>Стоимость — 3 000 ₽ ($35) в месяц.</b>"""
 
 OFFER_URL = "https://telegra.ph/Publichnaya-oferta--Klub-SVOI-09-24"
 
-PAYMENT_TEXT = f"""💳 <b>Стоимость: 3 000 ₽ / 30 дней</b>
+PAYMENT_TEXT = f"""💳 <b>Стоимость: 3 000 ₽ ($35) / 30 дней</b>
 Формат: ежемесячная подписка. Отписаться можно в любой момент.
 
-<i>Нажимая «Оплатить картой РФ» или «Оплатить картой не РФ», вы принимаете условия <a href="{OFFER_URL}">публичной оферты</a>.</i>
+<i>Нажимая «Оплатить картой РФ / РБ» или «Оплатить картой не РФ», вы принимаете условия <a href="{OFFER_URL}">публичной оферты</a>.</i>
 
 ⏳ Доступ в клуб откроется в течение нескольких минут после оплаты.
 
@@ -549,10 +549,10 @@ def main_keyboard(user_id):
 
 def payment_keyboard(user_id):
     try:
-        rf_button = InlineKeyboardButton("💳 Оплатить картой РФ", url=payment_link(user_id))
+        rf_button = InlineKeyboardButton("💳 Оплатить картой РФ / РБ", url=payment_link(user_id))
     except Exception as e:
         log.error("payment_link: %s", e)
-        rf_button = InlineKeyboardButton("💳 Оплатить картой РФ", url=f"https://t.me/{CONTACT}")
+        rf_button = InlineKeyboardButton("💳 Оплатить картой РФ / РБ", url=f"https://t.me/{CONTACT}")
     return InlineKeyboardMarkup([
         [rf_button],
         [InlineKeyboardButton("🌍 Оплатить картой не РФ", callback_data="pay_foreign")],
