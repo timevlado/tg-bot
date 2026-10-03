@@ -19,6 +19,7 @@ from telegram.ext import (
 TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = 1546392669
 CONTACT = "vm_N17"  # Служба заботы (без @)
+BOT_USERNAME = "vladmorozov_bot"  # имя бота для кнопок-ссылок в рассылке (без @)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # Робокасса
@@ -641,8 +642,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     add_user(user_id)
     # Сброс режима рассылки, если админ передумал
-    for k in ("bc_audience", "bc_stage", "bc_from_chat", "bc_message_id"):
+    for k in ("bc_audience", "bc_stage", "bc_from_chat", "bc_message_id", "bc_buttons"):
         context.user_data.pop(k, None)
+    # Пришёл по кнопке «Оформить подписку» из рассылки (?start=pay) — сразу на оплату
+    if context.args and context.args[0] == "pay":
+        await notify_admin(context, f"🔔 <b>Новый интерес к подписке!</b>\n\n{user_info(update.effective_user)}")
+        await update.message.reply_text(
+            PAYMENT_TEXT, parse_mode="HTML",
+            reply_markup=payment_keyboard(user_id), disable_web_page_preview=True,
+        )
+        return
     await update.message.reply_text(
         WELCOME_TEXT, parse_mode="HTML",
         reply_markup=main_keyboard(user_id), disable_web_page_preview=True,
@@ -658,11 +667,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- Рассылка (только админ) ---
     if query.data.startswith("bc_") and user.id == ADMIN_ID:
         if query.data == "bc_cancel":
-            for k in ("bc_audience", "bc_stage", "bc_from_chat", "bc_message_id"):
+            for k in ("bc_audience", "bc_stage", "bc_from_chat", "bc_message_id", "bc_buttons"):
                 context.user_data.pop(k, None)
             await query.message.reply_text("Рассылка отменена.")
         elif query.data.startswith("bc_aud_"):
             await broadcast_pick_audience(update, context, query.data.replace("bc_aud_", ""))
+        elif query.data.startswith("bc_btn_"):
+            await broadcast_confirm(update, context, query.data.replace("bc_btn_", ""))
         elif query.data == "bc_send":
             await broadcast_send(update, context)
         return
@@ -844,44 +855,77 @@ async def broadcast_pick_audience(update, context, audience):
     )
 
 
+def post_keyboard(kind):
+    """Кнопки, которые добавятся под пост рассылки."""
+    pay = InlineKeyboardButton("🔥 Оформить подписку", url=f"https://t.me/{BOT_USERNAME}?start=pay")
+    menu = InlineKeyboardButton("📋 Главное меню", url=f"https://t.me/{BOT_USERNAME}?start=menu")
+    if kind == "both":
+        return InlineKeyboardMarkup([[pay], [menu]])
+    if kind == "pay":
+        return InlineKeyboardMarkup([[pay]])
+    return None
+
+
 async def broadcast_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Шаг 3: получили сообщение — показываем предпросмотр и кнопку подтверждения."""
+    """Шаг 3: получили сообщение — спрашиваем про кнопки под постом."""
     msg = update.message
     context.user_data["bc_from_chat"] = msg.chat_id
     context.user_data["bc_message_id"] = msg.message_id
+    context.user_data["bc_stage"] = "buttons"
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔥 Подписка + 📋 Меню", callback_data="bc_btn_both")],
+        [InlineKeyboardButton("🔥 Только «Оформить подписку»", callback_data="bc_btn_pay")],
+        [InlineKeyboardButton("Без кнопок", callback_data="bc_btn_none")],
+        [InlineKeyboardButton("✖️ Отмена", callback_data="bc_cancel")],
+    ])
+    await msg.reply_text("Добавить кнопки под пост?", reply_markup=kb)
+
+
+async def broadcast_confirm(update, context, btn_kind):
+    """Шаг 4: показываем предпросмотр с кнопками и просим подтверждение."""
+    context.user_data["bc_buttons"] = btn_kind
     context.user_data["bc_stage"] = "confirm"
     audience = context.user_data.get("bc_audience", "all")
     count = len(users_by_audience(audience))
-    # Показываем, как это увидят люди
-    await context.bot.copy_message(chat_id=msg.chat_id, from_chat_id=msg.chat_id, message_id=msg.message_id)
+    from_chat = context.user_data["bc_from_chat"]
+    message_id = context.user_data["bc_message_id"]
+    q = update.callback_query
+    # Предпросмотр — точно с теми же кнопками, что уйдут людям
+    await context.bot.copy_message(
+        chat_id=q.message.chat_id, from_chat_id=from_chat, message_id=message_id,
+        reply_markup=post_keyboard(btn_kind),
+    )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"✅ Отправить ({count})", callback_data="bc_send")],
         [InlineKeyboardButton("✖️ Отмена", callback_data="bc_cancel")],
     ])
-    await msg.reply_text(
-        f"👆 Вот так увидят сообщение.\n\nГруппа: <b>{AUDIENCE_TITLES[audience]}</b> — {count} чел.\n"
-        "Отправляем?",
+    await q.message.reply_text(
+        f"👆 Вот так увидят люди.\n\nГруппа: <b>{AUDIENCE_TITLES[audience]}</b> — {count} чел.\nОтправляем?",
         parse_mode="HTML", reply_markup=kb,
     )
 
 
 async def broadcast_send(update, context):
-    """Шаг 4: рассылаем, копируя исходное сообщение (оформление сохраняется)."""
+    """Шаг 5: рассылаем, копируя исходное сообщение с выбранными кнопками."""
     audience = context.user_data.get("bc_audience", "all")
     from_chat = context.user_data.get("bc_from_chat")
     message_id = context.user_data.get("bc_message_id")
+    btn_kind = context.user_data.get("bc_buttons", "none")
     users = users_by_audience(audience)
     q = update.callback_query
     await q.message.reply_text(f"Отправляю {len(users)} чел... ⏳")
     success = 0
     for uid in users:
         try:
-            await context.bot.copy_message(chat_id=uid, from_chat_id=from_chat, message_id=message_id)
+            await context.bot.copy_message(
+                chat_id=uid, from_chat_id=from_chat, message_id=message_id,
+                reply_markup=post_keyboard(btn_kind),
+            )
             success += 1
             await asyncio.sleep(0.05)  # бережём лимиты Telegram
         except Exception:
             pass
-    for k in ("bc_audience", "bc_stage", "bc_from_chat", "bc_message_id"):
+    for k in ("bc_audience", "bc_stage", "bc_from_chat", "bc_message_id", "bc_buttons"):
         context.user_data.pop(k, None)
     await q.message.reply_text(f"✅ Готово. Доставлено: {success} из {len(users)}.")
 
