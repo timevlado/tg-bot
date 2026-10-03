@@ -144,6 +144,28 @@ def count_active():
         return 0
 
 
+def users_by_audience(audience):
+    """Список user_id для рассылки по выбранной группе."""
+    try:
+        if audience == "all":
+            return [r[0] for r in db("SELECT user_id FROM users", fetch="all")]
+        if audience == "active":
+            return [r[0] for r in db(
+                "SELECT user_id FROM subscriptions WHERE status = 'active'", fetch="all")]
+        if audience == "left":
+            # платили хотя бы раз, но сейчас подписка не активна
+            return [r[0] for r in db(
+                "SELECT user_id FROM subscriptions WHERE status <> 'active'", fetch="all")]
+        if audience == "new":
+            # есть в базе, но ни разу не было подписки
+            return [r[0] for r in db(
+                "SELECT user_id FROM users WHERE user_id NOT IN "
+                "(SELECT user_id FROM subscriptions)", fetch="all")]
+    except Exception as e:
+        print(f"DB error (users_by_audience): {e}")
+    return []
+
+
 def get_sub(user_id):
     try:
         row = db(
@@ -618,6 +640,9 @@ async def notify_admin(context, text):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     add_user(user_id)
+    # Сброс режима рассылки, если админ передумал
+    for k in ("bc_audience", "bc_stage", "bc_from_chat", "bc_message_id"):
+        context.user_data.pop(k, None)
     await update.message.reply_text(
         WELCOME_TEXT, parse_mode="HTML",
         reply_markup=main_keyboard(user_id), disable_web_page_preview=True,
@@ -629,6 +654,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
     add_user(user.id)
     await query.answer()
+
+    # --- Рассылка (только админ) ---
+    if query.data.startswith("bc_") and user.id == ADMIN_ID:
+        if query.data == "bc_cancel":
+            for k in ("bc_audience", "bc_stage", "bc_from_chat", "bc_message_id"):
+                context.user_data.pop(k, None)
+            await query.message.reply_text("Рассылка отменена.")
+        elif query.data.startswith("bc_aud_"):
+            await broadcast_pick_audience(update, context, query.data.replace("bc_aud_", ""))
+        elif query.data == "bc_send":
+            await broadcast_send(update, context)
+        return
 
     if query.data == "pay":
         await notify_admin(context, f"🔔 <b>Новый интерес к подписке!</b>\n\n{user_info(user)}")
@@ -677,8 +714,9 @@ async def help_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "🛠 <b>Команды админа</b>\n\n"
         "/stats — люди в базе и активные подписки\n\n"
-        "/broadcast <i>текст</i> — разослать текст всем\n"
-        "📸 Фото с подписью, присланное сюда, — рассылка фото всем\n\n"
+        "/рассылка — рассылка с выбором группы (всем / не оплативших / ушедших / активных).\n"
+        "Выбери кнопкой кому → пришли сообщение (текст, фото, видео, кружок, голосовое) → подтверди.\n"
+        "Оформление (жирный, курсив, ссылки) сохраняется.\n\n"
         "/grant <i>ID дней</i> — выдать доступ вручную (оплата картой не РФ)\n"
         "Пример: <code>/grant 123456789 30</code>\n"
         "/revoke <i>ID</i> — закрыть доступ и удалить из клуба\n\n"
@@ -767,36 +805,102 @@ async def forwarded_from_channel(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("Не вижу канал. Перешли пост именно из канала.")
 
 
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-    if not context.args:
-        await update.message.reply_text("Используй: /broadcast Текст сообщения")
-        return
-    message = " ".join(context.args)
-    success = 0
-    for uid in get_all_users():
-        try:
-            await context.bot.send_message(chat_id=uid, text=message)
-            success += 1
-        except Exception:
-            pass
-    await update.message.reply_text(f"✅ Рассылка отправлена {success} пользователям")
+# ===== РАССЫЛКА (кнопки + предпросмотр + сохранение оформления) =====
+AUDIENCE_TITLES = {
+    "all": "📣 Всем",
+    "new": "🆕 Не оплативших",
+    "left": "💔 Ушедших",
+    "active": "✅ Активных подписчиков",
+}
 
 
-async def broadcast_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 1: показываем кнопки выбора группы."""
     if not is_admin(update):
         return
-    caption = update.message.caption or ""
-    photo = update.message.photo[-1].file_id
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"📣 Всем ({count_users()})", callback_data="bc_aud_all")],
+        [InlineKeyboardButton(f"🆕 Не оплативших ({len(users_by_audience('new'))})", callback_data="bc_aud_new")],
+        [InlineKeyboardButton(f"💔 Ушедших ({len(users_by_audience('left'))})", callback_data="bc_aud_left")],
+        [InlineKeyboardButton(f"✅ Активных ({count_active()})", callback_data="bc_aud_active")],
+        [InlineKeyboardButton("✖️ Отмена", callback_data="bc_cancel")],
+    ])
+    await update.message.reply_text(
+        "📨 <b>Новая рассылка</b>\n\nКому отправляем?", parse_mode="HTML", reply_markup=kb
+    )
+
+
+async def broadcast_pick_audience(update, context, audience):
+    """Шаг 2: группа выбрана, ждём сообщение."""
+    context.user_data["bc_audience"] = audience
+    context.user_data["bc_stage"] = "await_message"
+    count = len(users_by_audience(audience))
+    await update.callback_query.message.reply_text(
+        f"Группа: <b>{AUDIENCE_TITLES[audience]}</b> — {count} чел.\n\n"
+        "Теперь пришли сообщение для рассылки: текст, фото, видео, кружок или голосовое. "
+        "Оформление (жирный, курсив, ссылки) сохранится как есть.\n\n"
+        "Для отмены — /start",
+        parse_mode="HTML",
+    )
+
+
+async def broadcast_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 3: получили сообщение — показываем предпросмотр и кнопку подтверждения."""
+    msg = update.message
+    context.user_data["bc_from_chat"] = msg.chat_id
+    context.user_data["bc_message_id"] = msg.message_id
+    context.user_data["bc_stage"] = "confirm"
+    audience = context.user_data.get("bc_audience", "all")
+    count = len(users_by_audience(audience))
+    # Показываем, как это увидят люди
+    await context.bot.copy_message(chat_id=msg.chat_id, from_chat_id=msg.chat_id, message_id=msg.message_id)
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"✅ Отправить ({count})", callback_data="bc_send")],
+        [InlineKeyboardButton("✖️ Отмена", callback_data="bc_cancel")],
+    ])
+    await msg.reply_text(
+        f"👆 Вот так увидят сообщение.\n\nГруппа: <b>{AUDIENCE_TITLES[audience]}</b> — {count} чел.\n"
+        "Отправляем?",
+        parse_mode="HTML", reply_markup=kb,
+    )
+
+
+async def broadcast_send(update, context):
+    """Шаг 4: рассылаем, копируя исходное сообщение (оформление сохраняется)."""
+    audience = context.user_data.get("bc_audience", "all")
+    from_chat = context.user_data.get("bc_from_chat")
+    message_id = context.user_data.get("bc_message_id")
+    users = users_by_audience(audience)
+    q = update.callback_query
+    await q.message.reply_text(f"Отправляю {len(users)} чел... ⏳")
     success = 0
-    for uid in get_all_users():
+    for uid in users:
         try:
-            await context.bot.send_photo(chat_id=uid, photo=photo, caption=caption)
+            await context.bot.copy_message(chat_id=uid, from_chat_id=from_chat, message_id=message_id)
             success += 1
+            await asyncio.sleep(0.05)  # бережём лимиты Telegram
         except Exception:
             pass
-    await update.message.reply_text(f"✅ Фото разослано {success} пользователям")
+    for k in ("bc_audience", "bc_stage", "bc_from_chat", "bc_message_id"):
+        context.user_data.pop(k, None)
+    await q.message.reply_text(f"✅ Готово. Доставлено: {success} из {len(users)}.")
+
+
+async def forwarded_or_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Пересланное сообщение: если идёт рассылка — это контент, иначе показываем ID канала."""
+    if context.user_data.get("bc_stage") == "await_message":
+        await broadcast_preview(update, context)
+        return
+    await forwarded_from_channel(update, context)
+
+
+async def broadcast_catch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сообщение админа: если идёт рассылка — это её контент, иначе обычный ответ."""
+    if context.user_data.get("bc_stage") == "await_message":
+        await broadcast_preview(update, context)
+        return
+    # не в режиме рассылки — ведём себя как обычно
+    await handle_message(update, context)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -828,17 +932,19 @@ def main():
     admin = filters.User(ADMIN_ID)
 
     app.add_handler(CommandHandler("start", start, filters=private))
-    app.add_handler(CommandHandler("help", help_admin, filters=private))
-    app.add_handler(CommandHandler("stats", stats_admin, filters=private))
-    app.add_handler(CommandHandler("broadcast", broadcast, filters=private))
-    app.add_handler(CommandHandler("grant", grant_cmd, filters=private))
-    app.add_handler(CommandHandler("revoke", revoke_cmd, filters=private))
-    app.add_handler(CommandHandler("msg", msg_cmd, filters=private))
-    app.add_handler(CommandHandler("chatid", chatid_cmd))
-    # Пересланный пост из канала — показать ID (ставим раньше рассылки фото!)
-    app.add_handler(MessageHandler(private & admin & filters.FORWARDED, forwarded_from_channel))
-    app.add_handler(MessageHandler(private & admin & filters.PHOTO & ~filters.FORWARDED, broadcast_photo))
+    # Админские команды: доступны только ADMIN_ID (фильтр admin) + проверка is_admin внутри
+    app.add_handler(CommandHandler("help", help_admin, filters=private & admin))
+    app.add_handler(CommandHandler("stats", stats_admin, filters=private & admin))
+    app.add_handler(CommandHandler(["рассылка", "post", "broadcast"], broadcast_start, filters=private & admin))
+    app.add_handler(CommandHandler("grant", grant_cmd, filters=private & admin))
+    app.add_handler(CommandHandler("revoke", revoke_cmd, filters=private & admin))
+    app.add_handler(CommandHandler("msg", msg_cmd, filters=private & admin))
+    app.add_handler(CommandHandler("chatid", chatid_cmd, filters=admin))
     app.add_handler(CallbackQueryHandler(button_handler))
+    # Пересланный пост из канала — показать ID (только когда НЕ идёт рассылка)
+    app.add_handler(MessageHandler(private & admin & filters.FORWARDED, forwarded_or_broadcast))
+    # Любое сообщение админа (контент рассылки, если она идёт, иначе обычный ответ)
+    app.add_handler(MessageHandler(private & admin & ~filters.COMMAND, broadcast_catch))
     app.add_handler(MessageHandler(private & filters.TEXT & ~filters.COMMAND, handle_message))
     print("Бот запущен...")
     app.run_polling()
