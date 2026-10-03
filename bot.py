@@ -714,7 +714,7 @@ async def help_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "🛠 <b>Команды админа</b>\n\n"
         "/stats — люди в базе и активные подписки\n\n"
-        "/рассылка — рассылка с выбором группы (всем / не оплативших / ушедших / активных).\n"
+        "/post — рассылка с выбором группы (всем / не оплативших / ушедших / активных).\n"
         "Выбери кнопкой кому → пришли сообщение (текст, фото, видео, кружок, голосовое) → подтверди.\n"
         "Оформление (жирный, курсив, ссылки) сохраняется.\n\n"
         "/grant <i>ID дней</i> — выдать доступ вручную (оплата картой не РФ)\n"
@@ -935,7 +935,7 @@ def main():
     # Админские команды: доступны только ADMIN_ID (фильтр admin) + проверка is_admin внутри
     app.add_handler(CommandHandler("help", help_admin, filters=private & admin))
     app.add_handler(CommandHandler("stats", stats_admin, filters=private & admin))
-    app.add_handler(CommandHandler(["рассылка", "post", "broadcast"], broadcast_start, filters=private & admin))
+    app.add_handler(CommandHandler(["post", "broadcast"], broadcast_start, filters=private & admin))
     app.add_handler(CommandHandler("grant", grant_cmd, filters=private & admin))
     app.add_handler(CommandHandler("revoke", revoke_cmd, filters=private & admin))
     app.add_handler(CommandHandler("msg", msg_cmd, filters=private & admin))
