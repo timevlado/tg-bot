@@ -884,6 +884,33 @@ async def chatid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"ID этого чата: <code>{chat.id}</code>", parse_mode="HTML")
 
 
+async def preview_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать экран согласия для скриншота (не влияет на оплату)."""
+    if not is_admin(update):
+        return
+    await update.message.reply_text(
+        CONSENT_TEXT, parse_mode="HTML",
+        reply_markup=consent_keyboard(), disable_web_page_preview=True,
+    )
+
+
+async def demosub_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Создать себе демо-подписку с автопродлением для скриншота «Моя подписка». Убрать: /revoke <свой ID>."""
+    if not is_admin(update):
+        return
+    uid = update.effective_user.id
+    try:
+        paid_until = extend_subscription(uid, first_inv_id=-1, days=PERIOD_DAYS, auto_renew=True)
+        text, kb = my_sub_view(uid)
+        await update.message.reply_text(
+            "Демо-подписка создана для скриншота. Вот как выглядит «Моя подписка»:",
+        )
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+        await update.message.reply_text(f"Убрать после скриншота: <code>/revoke {uid}</code>", parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка: {e}")
+
+
 async def forwarded_from_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     origin = update.message.forward_origin
     chat = getattr(origin, "chat", None)
@@ -1063,6 +1090,8 @@ def main():
     app.add_handler(CommandHandler("revoke", revoke_cmd, filters=private & admin))
     app.add_handler(CommandHandler("msg", msg_cmd, filters=private & admin))
     app.add_handler(CommandHandler("chatid", chatid_cmd, filters=admin))
+    app.add_handler(CommandHandler("preview", preview_cmd, filters=private & admin))
+    app.add_handler(CommandHandler("demosub", demosub_cmd, filters=private & admin))
     app.add_handler(CallbackQueryHandler(button_handler))
     # Пересланный пост из канала — показать ID (только когда НЕ идёт рассылка)
     app.add_handler(MessageHandler(private & admin & filters.FORWARDED, forwarded_or_broadcast))
