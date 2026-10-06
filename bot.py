@@ -110,6 +110,14 @@ def init_db():
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
+        db("""
+            CREATE TABLE IF NOT EXISTS consents (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                text TEXT NOT NULL,
+                agreed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
         print("База данных готова.")
     except Exception as e:
         print(f"Не удалось подключиться к базе при старте (бот продолжит работу): {e}")
@@ -558,6 +566,26 @@ Freedom bank: <code>4002890062233725</code>
 
 После оплаты отправьте скриншот чека — откроем доступ в клуб в течение нескольких минут 👇"""
 
+# Текст согласия на автосписания (показывается, когда включены рекуррентные платежи)
+CONSENT_TEXT = f"""💳 <b>Подписка 3 000 ₽ / 30 дней, с автопродлением</b>
+
+Списывается автоматически каждые 30 дней по 3 000 ₽. За день до списания придёт напоминание. Отключить можно в любой момент в «👤 Моя подписка».
+
+Условия — в <a href="{OFFER_URL}">публичной оферте</a>.
+
+Нажимая кнопку, вы подтверждаете:
+<b>«Я согласен на автоматические списания согласно условиям оферты».</b>"""
+
+CONSENT_DONE_TEXT = f"""💳 <b>Подписка 3 000 ₽ / 30 дней, с автопродлением</b>
+
+Списывается автоматически каждые 30 дней по 3 000 ₽. За день до списания придёт напоминание. Отключить можно в любой момент в «👤 Моя подписка».
+
+Условия — в <a href="{OFFER_URL}">публичной оферте</a>.
+
+✅ Согласие зафиксировано. Нажмите «Оплатить» 👇"""
+
+CONSENT_LABEL = "Я согласен на автоматические списания согласно условиям оферты"
+
 
 # ===== КЛАВИАТУРЫ =====
 def main_keyboard(user_id):
@@ -571,16 +599,42 @@ def main_keyboard(user_id):
 
 
 def payment_keyboard(user_id):
-    try:
-        rf_button = InlineKeyboardButton("💳 Оплатить картой РФ / РБ", url=payment_link(user_id))
-    except Exception as e:
-        log.error("payment_link: %s", e)
-        rf_button = InlineKeyboardButton("💳 Оплатить картой РФ / РБ", url=f"https://t.me/{CONTACT}")
+    # Когда включены автосписания — РФ-оплата идёт через шаг согласия (требование Робокассы)
+    if RK_RECURRING:
+        rf_button = InlineKeyboardButton("💳 Оплатить картой РФ / РБ", callback_data="pay_rf_consent")
+    else:
+        try:
+            rf_button = InlineKeyboardButton("💳 Оплатить картой РФ / РБ", url=payment_link(user_id))
+        except Exception as e:
+            log.error("payment_link: %s", e)
+            rf_button = InlineKeyboardButton("💳 Оплатить картой РФ / РБ", url=f"https://t.me/{CONTACT}")
     return InlineKeyboardMarkup([
         [rf_button],
         [InlineKeyboardButton("🌍 Оплатить картой не РФ", callback_data="pay_foreign")],
         [InlineKeyboardButton("↗️ Служба заботы", url=f"https://t.me/{CONTACT}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+    ])
+
+
+def consent_keyboard():
+    """Экран согласия: кнопка-согласие (callback — чтобы записать дату), оферта, назад."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Я согласен", callback_data="consent_ok")],
+        [InlineKeyboardButton("📄 Оферта", url=OFFER_URL)],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="pay")],
+    ])
+
+
+def pay_now_keyboard(user_id):
+    """После согласия — кнопка оплаты (заменяет кнопку согласия на том же экране)."""
+    try:
+        pay_url = payment_link(user_id)
+    except Exception as e:
+        log.error("payment_link: %s", e)
+        pay_url = f"https://t.me/{CONTACT}"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 Оплатить", url=pay_url)],
+        [InlineKeyboardButton("📄 Оферта", url=OFFER_URL)],
     ])
 
 
@@ -684,6 +738,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             PAYMENT_TEXT, parse_mode="HTML",
             reply_markup=payment_keyboard(user.id), disable_web_page_preview=True,
         )
+    elif query.data == "pay_rf_consent":
+        # Экран согласия на автосписания (только когда включены рекуррентные платежи)
+        await query.message.reply_text(
+            CONSENT_TEXT, parse_mode="HTML",
+            reply_markup=consent_keyboard(), disable_web_page_preview=True,
+        )
+    elif query.data == "consent_ok":
+        # Фиксируем согласие с датой и МЕНЯЕМ ТОТ ЖЕ экран на кнопку оплаты
+        try:
+            db("INSERT INTO consents (user_id, text) VALUES (%s, %s)", (user.id, CONSENT_LABEL))
+        except Exception as e:
+            log.error("consent save: %s", e)
+        await notify_admin(context, f"✍️ Согласие на автосписание\n\n{user_info(user)}")
+        try:
+            await query.edit_message_text(
+                CONSENT_DONE_TEXT, parse_mode="HTML",
+                reply_markup=pay_now_keyboard(user.id), disable_web_page_preview=True,
+            )
+        except Exception as e:
+            # запасной путь, если сообщение не удалось отредактировать
+            log.error("consent edit: %s", e)
+            await query.message.reply_text(
+                CONSENT_DONE_TEXT, parse_mode="HTML",
+                reply_markup=pay_now_keyboard(user.id), disable_web_page_preview=True,
+            )
     elif query.data == "pay_foreign":
         await notify_admin(
             context,
