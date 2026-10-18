@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlencode
 
@@ -33,6 +34,17 @@ RK_TEST_PASS1 = os.environ.get("ROBOKASSA_TEST_PASS1", "").strip()
 RK_TEST_PASS2 = os.environ.get("ROBOKASSA_TEST_PASS2", "").strip()
 RK_PAY_URL = "https://auth.robokassa.ru/Merchant/Index.aspx"
 RK_RECURRING_URL = "https://auth.robokassa.ru/Merchant/Recurring"
+
+# Lava.top — зарубежные карты. Автосписания целиком на стороне Lava, бот только реагирует на вебхуки.
+LAVA_API_KEY = os.environ.get("LAVA_API_KEY", "").strip()
+LAVA_OFFER_ID = os.environ.get("LAVA_OFFER_ID", "").strip()
+LAVA_WEBHOOK_SECRET = os.environ.get("LAVA_WEBHOOK_SECRET", "").strip()
+LAVA_CURRENCY = os.environ.get("LAVA_CURRENCY", "USD").strip()
+LAVA_PERIODICITY = os.environ.get("LAVA_PERIODICITY", "MONTHLY").strip()
+LAVA_PAYMENT_METHOD = os.environ.get("LAVA_PAYMENT_METHOD", "").strip()  # пусто = Lava сама покажет способы
+LAVA_INVOICE_URL = "https://gate.lava.top/api/v2/invoice"
+LAVA_PRODUCTS_URL = "https://gate.lava.top/api/v2/products"
+LAVA_ENABLED = bool(LAVA_API_KEY and LAVA_OFFER_ID)
 
 # Клуб: ID закрытого канала и чата комментариев (узнаём через бота, см. /help)
 CLUB_CHANNEL_ID = os.environ.get("CLUB_CHANNEL_ID", "").strip()
@@ -118,6 +130,17 @@ def init_db():
                 agreed_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
+        # Счета Lava: связь контракта Lava с пользователем Telegram
+        db("""
+            CREATE TABLE IF NOT EXISTS lava_invoices (
+                contract_id TEXT PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                email TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+        # Кто провайдер подписки: rk (Робокасса/ручная) или lava
+        db("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS provider TEXT DEFAULT 'rk'")
         print("База данных готова.")
     except Exception as e:
         print(f"Не удалось подключиться к базе при старте (бот продолжит работу): {e}")
@@ -178,7 +201,8 @@ def users_by_audience(audience):
 def get_sub(user_id):
     try:
         row = db(
-            "SELECT status, paid_until, auto_renew, first_inv_id FROM subscriptions WHERE user_id = %s",
+            "SELECT status, paid_until, auto_renew, first_inv_id, "
+            "COALESCE(provider, 'rk') FROM subscriptions WHERE user_id = %s",
             (user_id,), fetch="one",
         )
     except Exception as e:
@@ -186,7 +210,8 @@ def get_sub(user_id):
         return None
     if not row:
         return None
-    return {"status": row[0], "paid_until": row[1], "auto_renew": row[2], "first_inv_id": row[3]}
+    return {"status": row[0], "paid_until": row[1], "auto_renew": row[2],
+            "first_inv_id": row[3], "provider": row[4]}
 
 
 def is_active(user_id):
@@ -269,6 +294,77 @@ async def charge_recurring(user_id, first_inv_id):
     return resp.text
 
 
+# ===== LAVA.TOP (зарубежные карты) =====
+async def lava_create_invoice(user_id, email):
+    """Создаёт счёт в Lava и возвращает ссылку на оплату (или None).
+    Контракт запоминаем в lava_invoices, чтобы по вебхуку понять, кого впускать."""
+    if not LAVA_ENABLED:
+        return None
+    body = {
+        "email": email,
+        "offerId": LAVA_OFFER_ID,
+        "periodicity": LAVA_PERIODICITY,
+        "currency": LAVA_CURRENCY,
+        "buyerLanguage": "RU",
+    }
+    if LAVA_PAYMENT_METHOD:
+        body["paymentMethod"] = LAVA_PAYMENT_METHOD
+    headers = {"X-Api-Key": LAVA_API_KEY, "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(LAVA_INVOICE_URL, json=body, headers=headers)
+        log.info("Lava invoice for %s: %s %s", user_id, resp.status_code, resp.text[:300])
+        if resp.status_code not in (200, 201):
+            return None
+        data = resp.json()
+        contract_id = data.get("id")
+        pay_url = data.get("paymentUrl")
+        if not contract_id or not pay_url:
+            return None
+        db("INSERT INTO lava_invoices (contract_id, user_id, email) VALUES (%s, %s, %s) "
+           "ON CONFLICT (contract_id) DO NOTHING", (str(contract_id), user_id, email))
+        return pay_url
+    except Exception as e:
+        log.error("lava_create_invoice: %s", e)
+        return None
+
+
+async def lava_list_offers():
+    """Возвращает текст со списком продуктов и offerId (для команды /lavaoffers)."""
+    if not LAVA_API_KEY:
+        return "LAVA_API_KEY не задан."
+    headers = {"X-Api-Key": LAVA_API_KEY}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(LAVA_PRODUCTS_URL, headers=headers)
+        if resp.status_code != 200:
+            return f"Ошибка {resp.status_code}: {resp.text[:300]}"
+        items = resp.json().get("items", [])
+        lines = []
+        for it in items:
+            d = it.get("data", {})
+            title = d.get("title", "—")
+            for off in d.get("offers", []):
+                periods = ", ".join(
+                    p.get("periodicity", "?") for p in off.get("prices", [])
+                ) or "—"
+                lines.append(f"• {title}\n  offerId: <code>{off.get('id')}</code>\n  периоды: {periods}")
+        return "📦 <b>Продукты Lava</b>\n\n" + ("\n\n".join(lines) if lines else "Продуктов не найдено.")
+    except Exception as e:
+        return f"Ошибка запроса к Lava: {e}"
+
+
+def lava_find_user(contract_id, parent_contract_id):
+    """Находит Telegram ID по контракту Lava (первый платёж или продление)."""
+    for cid in (contract_id, parent_contract_id):
+        if not cid:
+            continue
+        row = db("SELECT user_id FROM lava_invoices WHERE contract_id = %s", (str(cid),), fetch="one")
+        if row:
+            return row[0]
+    return None
+
+
 # ===== ДОСТУП В КЛУБ =====
 def club_chats():
     return [c for c in (CLUB_CHANNEL_ID, CLUB_CHAT_ID) if c]
@@ -333,7 +429,7 @@ async def revoke_access(bot, user_id):
             await notify_admin_bot(bot, f"⚠️ Не удалось удалить <code>{user_id}</code> из <code>{chat}</code>: {e}")
 
 
-def extend_subscription(user_id, first_inv_id=None, days=PERIOD_DAYS, auto_renew=None):
+def extend_subscription(user_id, first_inv_id=None, days=PERIOD_DAYS, auto_renew=None, provider=None):
     """Продлевает подписку от текущей даты окончания (или от сегодня)."""
     sub = get_sub(user_id)
     start = now_utc()
@@ -343,15 +439,16 @@ def extend_subscription(user_id, first_inv_id=None, days=PERIOD_DAYS, auto_renew
     if sub:
         db(
             "UPDATE subscriptions SET status = 'active', paid_until = %s, "
-            "auto_renew = COALESCE(%s, auto_renew), first_inv_id = COALESCE(%s, first_inv_id) "
+            "auto_renew = COALESCE(%s, auto_renew), first_inv_id = COALESCE(%s, first_inv_id), "
+            "provider = COALESCE(%s, provider) "
             "WHERE user_id = %s",
-            (paid_until, auto_renew, first_inv_id, user_id),
+            (paid_until, auto_renew, first_inv_id, provider, user_id),
         )
     else:
         db(
-            "INSERT INTO subscriptions (user_id, status, paid_until, auto_renew, first_inv_id) "
-            "VALUES (%s, 'active', %s, %s, %s)",
-            (user_id, paid_until, bool(auto_renew), first_inv_id),
+            "INSERT INTO subscriptions (user_id, status, paid_until, auto_renew, first_inv_id, provider) "
+            "VALUES (%s, 'active', %s, %s, %s, %s)",
+            (user_id, paid_until, bool(auto_renew), first_inv_id, provider or 'rk'),
         )
     return paid_until
 
@@ -429,6 +526,72 @@ async def health(request):
     return web.Response(text="ok")
 
 
+# ===== ПРИЁМ УВЕДОМЛЕНИЙ ОТ LAVA (webhook) =====
+async def lava_webhook(request):
+    # Проверка ключа (Lava шлёт его в X-Api-Key, значение задаём в настройках вебхука = LAVA_WEBHOOK_SECRET)
+    if LAVA_WEBHOOK_SECRET and request.headers.get("X-Api-Key", "") != LAVA_WEBHOOK_SECRET:
+        log.warning("Lava webhook: неверный ключ")
+        return web.Response(text="bad key", status=403)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.Response(text="bad json", status=400)
+
+    event = data.get("eventType") or data.get("event_type") or ""
+    contract_id = data.get("contractId")
+    parent_id = data.get("parentContractId")
+    email = (data.get("buyer") or {}).get("email", "")
+    status = data.get("status", "")
+    log.info("Lava webhook: event=%s contract=%s parent=%s status=%s", event, contract_id, parent_id, status)
+
+    user_id = lava_find_user(contract_id, parent_id)
+    if not user_id:
+        log.warning("Lava webhook: не нашёл пользователя по контракту %s / %s (email=%s)",
+                    contract_id, parent_id, email)
+        await notify_admin_bot(request.app["bot"],
+                               f"⚠️ Lava: оплата {email}, но пользователь не найден в базе. Событие: {event}")
+        return web.Response(text="ok")
+
+    bot = request.app["bot"]
+    ev = event.lower()
+
+    # Успех: первая оплата или продление
+    if ev in ("payment.success", "subscription.recurring.payment.success") or status in ("completed", "subscription-active"):
+        was_active = is_active(user_id)
+        paid_until = extend_subscription(user_id, days=PERIOD_DAYS, auto_renew=True, provider="lava")
+        # на продлении привяжем дочерний контракт к тому же пользователю (на будущее)
+        if contract_id:
+            db("INSERT INTO lava_invoices (contract_id, user_id, email) VALUES (%s, %s, %s) "
+               "ON CONFLICT (contract_id) DO NOTHING", (str(contract_id), user_id, email))
+        try:
+            await grant_access(bot, user_id, paid_until, first_payment=not was_active, auto_renew=True)
+        except Exception as e:
+            log.error("lava grant_access %s: %s", user_id, e)
+        label = "💰 Новая оплата (Lava)" if not was_active else "🔁 Продление (Lava)"
+        await notify_admin_bot(bot, f"{label}: {email}\nID: <code>{user_id}</code>\nДо: {fmt_date(paid_until)}")
+        return web.Response(text="ok")
+
+    # Отмена подписки — доступ оставляем до конца оплаченного периода, дальше billing_loop удалит
+    if ev == "subscription.cancelled" or data.get("subscription_cancelled"):
+        db("UPDATE subscriptions SET auto_renew = FALSE WHERE user_id = %s", (user_id,))
+        await notify_admin_bot(bot, f"⏸ Lava: отменил автопродление\nID: <code>{user_id}</code>")
+        return web.Response(text="ok")
+
+    # Возврат или чарджбэк — закрываем доступ сразу
+    if ev in ("refund.success", "chargeback.initiated") or data.get("event_type") in ("refund.success", "chargeback.initiated"):
+        db("UPDATE subscriptions SET status = 'expired', auto_renew = FALSE WHERE user_id = %s", (user_id,))
+        await revoke_access(bot, user_id)
+        await notify_admin_bot(bot, f"↩️ Lava: возврат/чарджбэк, доступ закрыт\nID: <code>{user_id}</code>")
+        return web.Response(text="ok")
+
+    # Неуспешное списание — Lava сама повторит, доступ не трогаем
+    if ev == "subscription.recurring.payment.failed" or ev == "payment.failed":
+        await notify_admin_bot(bot, f"⚠️ Lava: списание не прошло (Lava повторит)\nID: <code>{user_id}</code>")
+        return web.Response(text="ok")
+
+    return web.Response(text="ok")
+
+
 # ===== ФОНОВАЯ ПРОВЕРКА ПОДПИСОК =====
 async def billing_loop(bot):
     await asyncio.sleep(30)
@@ -447,6 +610,7 @@ async def billing_tick(bot):
     rows = db(
         "SELECT user_id, paid_until, auto_renew AND first_inv_id IS NOT NULL FROM subscriptions "
         "WHERE status = 'active' AND paid_until > %s AND paid_until <= %s "
+        "AND COALESCE(provider, 'rk') <> 'lava' "
         "AND (reminded_for IS NULL OR reminded_for <> paid_until)",
         (now, now + timedelta(days=1)), fetch="all",
     )
@@ -659,6 +823,13 @@ def my_sub_view(user_id):
         return "Активной подписки нет.", main_keyboard(user_id)
     text = f"👤 <b>Моя подписка</b>\n\nСтатус: активна\nОплачено до: <b>{fmt_date(sub['paid_until'])}</b>\n"
     rows = []
+    if sub.get("provider") == "lava":
+        # Подписка через Lava — продлевает и управляет списаниями сама Lava
+        text += "Оплата: зарубежная карта (Lava)\nАвтопродление: <b>включено</b>\n\n"
+        text += "Чтобы отменить автопродление — напишите в Службу заботы."
+        rows.append([InlineKeyboardButton("↗️ Служба заботы", url=f"https://t.me/{CONTACT}")])
+        rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
+        return text, InlineKeyboardMarkup(rows)
     if sub["first_inv_id"]:
         if sub["auto_renew"]:
             text += "Автопродление: <b>включено</b>"
@@ -764,15 +935,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=pay_now_keyboard(user.id), disable_web_page_preview=True,
             )
     elif query.data == "pay_foreign":
-        await notify_admin(
-            context,
-            f"🔥 <b>Хочет оплатить картой не РФ!</b>\n\n{user_info(user)}\n\n"
-            f"После скриншота выдай доступ: <code>/grant {user.id} 30</code>",
-        )
-        await query.message.reply_text(
-            PAY_FOREIGN_TEXT, parse_mode="HTML",
-            reply_markup=foreign_keyboard(), disable_web_page_preview=True,
-        )
+        if LAVA_ENABLED:
+            context.user_data["await_lava_email"] = True
+            await query.message.reply_text(
+                "🌍 <b>Оплата картой не РФ — $35 / 30 дней</b>, с автопродлением.\n\n"
+                "Для оплаты и чека укажите ваш <b>email</b> — пришлите его ответным сообщением 👇\n\n"
+                f"Оплачивая, вы принимаете условия <a href=\"{OFFER_URL}\">публичной оферты</a>.",
+                parse_mode="HTML", disable_web_page_preview=True,
+            )
+        else:
+            await notify_admin(
+                context,
+                f"🔥 <b>Хочет оплатить картой не РФ!</b>\n\n{user_info(user)}\n\n"
+                f"После скриншота выдай доступ: <code>/grant {user.id} 30</code>",
+            )
+            await query.message.reply_text(
+                PAY_FOREIGN_TEXT, parse_mode="HTML",
+                reply_markup=foreign_keyboard(), disable_web_page_preview=True,
+            )
     elif query.data == "my_sub":
         text, kb = my_sub_view(user.id)
         await query.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
@@ -813,8 +993,10 @@ async def help_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/msg <i>ID текст</i> — написать клиенту от имени бота (если у него нет username)\n\n"
         "🆔 Узнать ID канала: перешли сюда любой пост из канала.\n"
         "🆔 Узнать ID чата: напиши в чате <code>/chatid</code>\n\n"
+        "/lavaoffers — показать продукты Lava и их offerId (для зарубежных карт)\n\n"
         f"Режим оплаты: {mode}\n"
-        f"Автосписания: {'✅ включены' if RK_RECURRING else '⏸ выключены (продление по напоминанию)'}\n"
+        f"Автосписания (Робокасса): {'✅ включены' if RK_RECURRING else '⏸ выключены (продление по напоминанию)'}\n"
+        f"Lava (зарубежные): {'✅ подключена' if LAVA_ENABLED else '❌ не задана (LAVA_API_KEY/LAVA_OFFER_ID)'}\n"
         f"Канал: {CLUB_CHANNEL_ID or '❌ не задан'}\n"
         f"Чат: {CLUB_CHAT_ID or '❌ не задан'}"
     )
@@ -882,6 +1064,15 @@ async def chatid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat = update.effective_chat
     await update.message.reply_text(f"ID этого чата: <code>{chat.id}</code>", parse_mode="HTML")
+
+
+async def lavaoffers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать продукты Lava и их offerId — чтобы вписать LAVA_OFFER_ID в Railway."""
+    if not is_admin(update):
+        return
+    await update.message.reply_text("Запрашиваю продукты у Lava... ⏳")
+    text = await lava_list_offers()
+    await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
 
 
 async def preview_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1053,9 +1244,45 @@ async def broadcast_catch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await handle_message(update, context)
 
 
+import re
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     add_user(user_id)
+
+    # Ждём email для оплаты через Lava (зарубежные карты)
+    if context.user_data.get("await_lava_email"):
+        email = (update.message.text or "").strip()
+        if not EMAIL_RE.match(email):
+            await update.message.reply_text("Похоже, это не email. Пришлите адрес вида name@mail.com 👇")
+            return
+        context.user_data.pop("await_lava_email", None)
+        await update.message.reply_text("Создаю ссылку на оплату... ⏳")
+        pay_url = await lava_create_invoice(user_id, email)
+        if pay_url:
+            await notify_admin_bot(
+                context.bot,
+                f"🌍 Оформляет подписку через Lava\n{user_info(update.effective_user)}\nEmail: {email}",
+            )
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💳 Оплатить", url=pay_url)],
+                [InlineKeyboardButton("↗️ Служба заботы", url=f"https://t.me/{CONTACT}")],
+            ])
+            await update.message.reply_text(
+                "Готово! Нажмите «Оплатить» — email уже подставлен, введите только данные карты.\n\n"
+                "После оплаты доступ в клуб откроется автоматически 👇",
+                reply_markup=kb,
+            )
+        else:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("↗️ Служба заботы", url=f"https://t.me/{CONTACT}")]])
+            await update.message.reply_text(
+                "Не удалось создать ссылку на оплату. Напишите в Службу заботы — поможем 👇",
+                reply_markup=kb,
+            )
+        return
+
     await update.message.reply_text(
         "Нажми кнопку ниже 👇", reply_markup=main_keyboard(user_id)
     )
@@ -1066,6 +1293,7 @@ async def on_startup(application: Application):
     webapp = web.Application()
     webapp["bot"] = application.bot
     webapp.router.add_post("/robokassa/result", robokassa_result)
+    webapp.router.add_post("/lava/webhook", lava_webhook)
     webapp.router.add_get("/health", health)
     runner = web.AppRunner(webapp)
     await runner.setup()
@@ -1090,6 +1318,7 @@ def main():
     app.add_handler(CommandHandler("revoke", revoke_cmd, filters=private & admin))
     app.add_handler(CommandHandler("msg", msg_cmd, filters=private & admin))
     app.add_handler(CommandHandler("chatid", chatid_cmd, filters=admin))
+    app.add_handler(CommandHandler("lavaoffers", lavaoffers_cmd, filters=private & admin))
     app.add_handler(CommandHandler("preview", preview_cmd, filters=private & admin))
     app.add_handler(CommandHandler("demosub", demosub_cmd, filters=private & admin))
     app.add_handler(CallbackQueryHandler(button_handler))
