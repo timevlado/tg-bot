@@ -334,9 +334,11 @@ async def lava_list_offers():
     if not LAVA_API_KEY:
         return "LAVA_API_KEY не задан."
     headers = {"X-Api-Key": LAVA_API_KEY}
+    # feedVisibility=ALL — показать и скрытые; showAllSubscriptionPeriods — все периоды подписок
+    params = {"feedVisibility": "ALL", "showAllSubscriptionPeriods": "true"}
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(LAVA_PRODUCTS_URL, headers=headers)
+            resp = await client.get(LAVA_PRODUCTS_URL, headers=headers, params=params)
         if resp.status_code != 200:
             return f"Ошибка {resp.status_code}: {resp.text[:300]}"
         items = resp.json().get("items", [])
@@ -344,12 +346,19 @@ async def lava_list_offers():
         for it in items:
             d = it.get("data", {})
             title = d.get("title", "—")
-            for off in d.get("offers", []):
-                periods = ", ".join(
-                    p.get("periodicity", "?") for p in off.get("prices", [])
+            ptype = d.get("type", "")
+            for off in d.get("offers", []) or []:
+                prices = off.get("prices", []) or []
+                pr = ", ".join(
+                    f"{p.get('amount')} {p.get('currency')}/{p.get('periodicity')}" for p in prices
                 ) or "—"
-                lines.append(f"• {title}\n  offerId: <code>{off.get('id')}</code>\n  периоды: {periods}")
-        return "📦 <b>Продукты Lava</b>\n\n" + ("\n\n".join(lines) if lines else "Продуктов не найдено.")
+                lines.append(
+                    f"• <b>{title}</b> ({ptype})\n  offerId: <code>{off.get('id')}</code>\n  цены: {pr}"
+                )
+        if lines:
+            return "📦 <b>Продукты Lava</b>\n\n" + "\n\n".join(lines)
+        return (f"Продуктов с офферами не найдено (всего элементов: {len(items)}).\n"
+                "Проверь, что подписка создана и сохранена в Lava, и попробуй ещё раз.")
     except Exception as e:
         return f"Ошибка запроса к Lava: {e}"
 
