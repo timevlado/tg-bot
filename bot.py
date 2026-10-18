@@ -357,8 +357,9 @@ async def lava_list_offers():
                 )
         if lines:
             return "📦 <b>Продукты Lava</b>\n\n" + "\n\n".join(lines)
-        return (f"Продуктов с офферами не найдено (всего элементов: {len(items)}).\n"
-                "Проверь, что подписка создана и сохранена в Lava, и попробуй ещё раз.")
+        raw = json.dumps(items, ensure_ascii=False)[:1200]
+        return ("Офферы не распознаны. Вот что вернула Lava (покажи это Клоду):\n\n"
+                f"<code>{raw}</code>")
     except Exception as e:
         return f"Ошибка запроса к Lava: {e}"
 
