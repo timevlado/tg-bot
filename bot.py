@@ -175,6 +175,7 @@ def init_db():
         db("ALTER TABLE lava_invoices ADD COLUMN IF NOT EXISTS days INTEGER DEFAULT 30")
         # Настройки бота (например, видео в приветствии)
         db("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        migrate_welcome_settings()
         print("База данных готова.")
     except Exception as e:
         print(f"Не удалось подключиться к базе при старте (бот продолжит работу): {e}")
@@ -818,8 +819,7 @@ async def billing_tick(bot):
 WELCOME_TEXT = """<b>Ты в одном шаге от входа в клуб «СВОИ»</b>
 
 <b>Что будет внутри?</b>
-
-🔥 <b>Прогнозы</b>
+<blockquote expandable>🔥 <b>Прогнозы</b>
 По линии и в лайве.
 
 👀 <b>Наблюдения</b>
@@ -841,8 +841,7 @@ WELCOME_TEXT = """<b>Ты в одном шаге от входа в клуб «�
 Большой курс о том, как самостоятельно анализировать матчи.
 
 🤖 <b>AI и инструменты</b>
-Как применять ИИ и другие полезные инструменты в нашей сфере.
-
+Как применять ИИ и другие полезные инструменты в нашей сфере.</blockquote>
 <b>И это только начало.</b>
 Клуб будет постепенно развиваться и дополняться новыми материалами, возможностями и инструментами.
 
@@ -1065,73 +1064,65 @@ async def notify_admin(context, text):
 
 
 # ===== ПРИВЕТСТВИЕ С ВИДЕО =====
-# Видео сверху, под ним текст приветствия и кнопки — одним сообщением.
+# Видео сверху (без отдельной обложки — так Telegram запускает его в чате сам), под ним текст и кнопки.
 # Файл лежит в репозитории (media/), после первой отправки Telegram выдаёт file_id — дальше шлём по нему (мгновенно).
-# Админ может заменить видео командой /setvideo (или выключить: /setvideo off).
+# Настройки: welcome_video — замена от админа (/setvideo: свой file_id или "off"),
+#            welcome_video_cache — file_id стандартного ролика после первой загрузки.
 MEDIA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
 WELCOME_VIDEO_PATH = os.path.join(MEDIA_DIR, "welcome.mp4")
-WELCOME_COVER_PATH = os.path.join(MEDIA_DIR, "welcome_cover.jpg")
 WELCOME_THUMB_PATH = os.path.join(MEDIA_DIR, "welcome_thumb.jpg")
 
 
+def migrate_welcome_settings():
+    """Разово: убрать file_id, загруженный в первой версии с обложкой (с ней видео не запускалось само)."""
+    if get_setting("welcome_migrated_v2"):
+        return
+    if get_setting("welcome_video") != "off":
+        set_setting("welcome_video", None)
+    set_setting("welcome_cover", None)
+    set_setting("welcome_migrated_v2", "1")
+
+
 async def send_welcome(bot, chat_id, user_id):
-    video_id = get_setting("welcome_video")          # file_id, "off" или пусто (= файл из репозитория)
-    if video_id != "off":
+    override = get_setting("welcome_video")          # свой file_id от админа, "off" или пусто
+    if override != "off":
         files = []
+        key = "welcome_video" if override else "welcome_video_cache"
         try:
             kwargs = {}
-            if video_id:
-                video = video_id
-                cover_id = get_setting("welcome_cover")
-                if cover_id:
-                    kwargs["cover"] = cover_id
-            elif os.path.exists(WELCOME_VIDEO_PATH):
+            video = override or get_setting("welcome_video_cache")
+            if not video and os.path.exists(WELCOME_VIDEO_PATH):
                 video = open(WELCOME_VIDEO_PATH, "rb")
                 files.append(video)
                 kwargs.update(width=1280, height=720, duration=22, supports_streaming=True)
                 if os.path.exists(WELCOME_THUMB_PATH):
                     files.append(open(WELCOME_THUMB_PATH, "rb"))
                     kwargs["thumbnail"] = files[-1]
-                if os.path.exists(WELCOME_COVER_PATH):
-                    files.append(open(WELCOME_COVER_PATH, "rb"))
-                    kwargs["cover"] = files[-1]
-            else:
-                video = None
-            if video is not None:
-                try:
-                    msg = await bot.send_video(
-                        chat_id, video=video, caption=WELCOME_TEXT, parse_mode="HTML",
-                        reply_markup=main_keyboard(user_id), **kwargs,
-                    )
-                except Exception as e:
-                    if "cover" not in kwargs:
-                        raise
-                    # запасной вариант: без обложки (если Telegram её не принял)
-                    log.warning("welcome video with cover failed, retry without: %s", e)
-                    kwargs.pop("cover", None)
-                    for f in files:
-                        f.seek(0)
-                    msg = await bot.send_video(
-                        chat_id, video=video, caption=WELCOME_TEXT, parse_mode="HTML",
-                        reply_markup=main_keyboard(user_id), **kwargs,
-                    )
-                if not video_id and msg.video:
+            if video:
+                msg = await bot.send_video(
+                    chat_id, video=video, caption=WELCOME_TEXT, parse_mode="HTML",
+                    reply_markup=main_keyboard(user_id), **kwargs,
+                )
+                if files and msg.video:
                     # запоминаем, чтобы дальше не загружать файл заново
-                    set_setting("welcome_video", msg.video.file_id)
-                    if msg.video.cover:
-                        set_setting("welcome_cover", msg.video.cover[-1].file_id)
+                    set_setting("welcome_video_cache", msg.video.file_id)
                 return
         except Exception as e:
             log.warning("welcome video: %s", e)
-            if video_id and "file" in str(e).lower():
-                set_setting("welcome_video", None)   # file_id испорчен — в следующий раз загрузим файл заново
-                set_setting("welcome_cover", None)
+            if not files and "file" in str(e).lower():
+                set_setting(key, None)   # file_id испорчен — в следующий раз загрузим стандартный файл заново
         finally:
             for f in files:
                 f.close()
     # Без видео (или если видео не отправилось) — просто текст
-    await bot.send_message(chat_id, WELCOME_TEXT, parse_mode="HTML",
-                           reply_markup=main_keyboard(user_id), disable_web_page_preview=True)
+    try:
+        await bot.send_message(chat_id, WELCOME_TEXT, parse_mode="HTML",
+                               reply_markup=main_keyboard(user_id), disable_web_page_preview=True)
+    except Exception as e:
+        # крайний случай: Telegram не принял оформление — шлём тот же текст без разметки
+        log.error("welcome text: %s", e)
+        await bot.send_message(chat_id, re.sub(r"<[^>]+>", "", WELCOME_TEXT),
+                               reply_markup=main_keyboard(user_id), disable_web_page_preview=True)
 
 
 async def setvideo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1141,12 +1132,10 @@ async def setvideo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     arg = (context.args[0].lower() if context.args else "")
     if arg == "off":
         set_setting("welcome_video", "off")
-        set_setting("welcome_cover", None)
         await update.message.reply_text("⏹ Видео в приветствии выключено. Вернуть: /setvideo default")
         return
     if arg == "default":
         set_setting("welcome_video", None)
-        set_setting("welcome_cover", None)
         await update.message.reply_text("✅ Вернул стандартное видео. Вот как выглядит /start:")
         await send_welcome(context.bot, update.effective_chat.id, update.effective_user.id)
         return
@@ -1165,52 +1154,8 @@ async def save_welcome_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     context.user_data.pop("await_welcome_video", None)
     set_setting("welcome_video", video.file_id)
-    set_setting("welcome_cover", None)
     await update.message.reply_text("✅ Видео в приветствии заменено. Вот как теперь выглядит /start:")
     await send_welcome(context.bot, update.effective_chat.id, update.effective_user.id)
-
-
-async def testvideo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Временная команда: показать ролик в 4 вариантах, чтобы выбрать, какой запускается сам."""
-    if not is_admin(update):
-        return
-    bot, chat, uid = context.bot, update.effective_chat.id, update.effective_user.id
-    test_dir = os.path.join(MEDIA_DIR, "test")
-
-    async def label(text):
-        await bot.send_message(chat, text, parse_mode="HTML")
-
-
-    async def v1():
-        await label("1️⃣ <b>Видео с обложкой</b> — как сейчас")
-        await send_welcome(bot, chat, uid)
-
-    async def v2():
-        await label("2️⃣ <b>Видео без обложки</b>")
-        with open(WELCOME_VIDEO_PATH, "rb") as f, open(WELCOME_THUMB_PATH, "rb") as th:
-            await bot.send_video(chat, video=f, thumbnail=th, width=1280, height=720, duration=22,
-                                 supports_streaming=True, caption=WELCOME_TEXT, parse_mode="HTML",
-                                 reply_markup=main_keyboard(uid))
-
-    async def v3():
-        await label("3️⃣ <b>Анимация (GIF)</b> — играет сама везде, но без звука")
-        with open(os.path.join(test_dir, "welcome_gif.mp4"), "rb") as f, open(WELCOME_THUMB_PATH, "rb") as th:
-            await bot.send_animation(chat, animation=f, thumbnail=th, width=1280, height=720, duration=22,
-                                     caption=WELCOME_TEXT, parse_mode="HTML", reply_markup=main_keyboard(uid))
-
-    async def v4():
-        await label("4️⃣ <b>Кругляшок</b> — в чате без звука, нажал — со звуком. Текст отдельным сообщением")
-        with open(os.path.join(test_dir, "welcome_round.mp4"), "rb") as f:
-            await bot.send_video_note(chat, video_note=f, length=640, duration=22)
-        await bot.send_message(chat, WELCOME_TEXT, parse_mode="HTML",
-                               reply_markup=main_keyboard(uid), disable_web_page_preview=True)
-
-    await update.message.reply_text("Отправляю 4 варианта… ⏳ Посмотри на телефоне и на компьютере, какой запускается сам.")
-    for n, step in enumerate((v1, v2, v3, v4), 1):
-        try:
-            await step()
-        except Exception as e:
-            await label(f"⚠️ Вариант {n} не отправился: {e}")
 
 
 # ===== ОБРАБОТЧИКИ =====
@@ -1713,7 +1658,6 @@ def main():
     app.add_handler(CommandHandler("preview", preview_cmd, filters=private & admin))
     app.add_handler(CommandHandler("demosub", demosub_cmd, filters=private & admin))
     app.add_handler(CommandHandler("setvideo", setvideo_cmd, filters=private & admin))
-    app.add_handler(CommandHandler("testvideo", testvideo_cmd, filters=private & admin))
     app.add_handler(CallbackQueryHandler(button_handler))
     # Пересланный пост из канала — показать ID (только когда НЕ идёт рассылка)
     app.add_handler(MessageHandler(private & admin & filters.FORWARDED, forwarded_or_broadcast))
