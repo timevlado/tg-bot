@@ -17,6 +17,7 @@ from telegram.ext import (
 )
 
 # ===== НАСТРОЙКИ =====
+BOT_VERSION = "2026-11-19 · анимация в /start"  # видно в /help — так понятно, что обновление дошло
 TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = 1546392669
 CONTACT = "vm_N17"  # Служба заботы (без @)
@@ -1074,13 +1075,14 @@ WELCOME_THUMB_PATH = os.path.join(MEDIA_DIR, "welcome_thumb.jpg")
 
 
 def migrate_welcome_settings():
-    """Разово: убрать file_id, загруженный в первой версии с обложкой (с ней видео не запускалось само)."""
-    if get_setting("welcome_migrated_v2"):
+    """Разово при переходе на анимацию: убрать из базы любой прежний ролик (старое видео со звуком,
+    file_id из прошлых версий), чтобы в /start точно шла стандартная анимация."""
+    if get_setting("welcome_migrated_v3"):
         return
-    if get_setting("welcome_video") != "off":
-        set_setting("welcome_video", None)
-    set_setting("welcome_cover", None)
-    set_setting("welcome_migrated_v2", "1")
+    for key in ("welcome_video", "welcome_cover", "welcome_video_cache"):
+        set_setting(key, None)
+    set_setting("welcome_migrated_v3", "1")
+    log.info("welcome: старые настройки ролика сброшены, в /start — стандартная анимация")
 
 
 async def send_welcome(bot, chat_id, user_id):
@@ -1314,6 +1316,7 @@ async def help_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Тарифы для новых: месяц {rub(TARIFFS['m']['price'])} ₽ / ${TARIFFS['m']['usd']}, "
         f"год {rub(TARIFFS['y']['price'])} ₽ / ${TARIFFS['y']['usd']}\n"
         f"Старые подписчики продлеваются по своей прежней цене.\n"
+        f"Версия бота: {BOT_VERSION}\n"
         f"Режим оплаты: {mode}\n"
         f"Автосписания (Робокасса): {'✅ включены' if RK_RECURRING else '⏸ выключены (продление по напоминанию)'}\n"
         f"Lava (зарубежные): {'✅ подключена' if LAVA_ENABLED else '❌ не задана (LAVA_API_KEY/LAVA_OFFER_ID)'}"
@@ -1665,7 +1668,7 @@ def main():
     # Любое сообщение админа (контент рассылки, если она идёт, иначе обычный ответ)
     app.add_handler(MessageHandler(private & admin & ~filters.COMMAND, broadcast_catch))
     app.add_handler(MessageHandler(private & filters.TEXT & ~filters.COMMAND, handle_message))
-    print("Бот запущен...")
+    print(f"Бот запущен... Версия: {BOT_VERSION}")
     app.run_polling()
 
 
