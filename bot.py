@@ -40,7 +40,6 @@ LAVA_API_KEY = os.environ.get("LAVA_API_KEY", "").strip()
 LAVA_OFFER_ID = os.environ.get("LAVA_OFFER_ID", "").strip()
 LAVA_WEBHOOK_SECRET = os.environ.get("LAVA_WEBHOOK_SECRET", "").strip()
 LAVA_CURRENCY = os.environ.get("LAVA_CURRENCY", "USD").strip()
-LAVA_PERIODICITY = os.environ.get("LAVA_PERIODICITY", "MONTHLY").strip()
 LAVA_PAYMENT_METHOD = os.environ.get("LAVA_PAYMENT_METHOD", "").strip()  # пусто = Lava сама покажет способы
 LAVA_INVOICE_URL = "https://gate.lava.top/api/v2/invoice"
 LAVA_PRODUCTS_URL = "https://gate.lava.top/api/v2/products"
@@ -52,11 +51,35 @@ CLUB_CHAT_ID = os.environ.get("CLUB_CHAT_ID", "").strip()
 
 WEB_PORT = 8080  # тот же порт, что указан в Railway → Networking
 
-PRICE = 3000
-PERIOD_DAYS = 30
-OUT_SUM = f"{PRICE}.00"
-DESCRIPTION = "Подписка на Клуб «СВОИ», 30 дней"
-RECEIPT_ITEM = "Информационно-консультационные услуги (подписка на Клуб «СВОИ», 30 дней)"
+# ===== ТАРИФЫ =====
+# Цены для НОВЫХ подписчиков. Кто уже подписан с автопродлением — продлевается по своей прежней цене
+# (бот берёт сумму из первого платежа человека, см. charge_recurring).
+TARIFFS = {
+    "m": {"price": 9000, "usd": 115, "days": 30, "lava_period": "MONTHLY",
+          "name": "месяц", "per": "в месяц", "every": "каждые 30 дней"},
+    "y": {"price": 79000, "usd": 950, "days": 365, "lava_period": "PERIOD_YEAR",
+          "name": "год", "per": "за год", "every": "раз в год (каждые 365 дней)"},
+}
+PERIOD_DAYS = 30            # срок по умолчанию (ручная выдача /grant и старые подписки)
+LEGACY_PRICE = 3000         # цена старых подписок, у которых сумма не записана
+
+
+def rub(n):
+    """9000 -> «9 000»"""
+    return f"{int(n):,}".replace(",", " ")
+
+
+def year_saving():
+    m, y = TARIFFS["m"], TARIFFS["y"]
+    return m["price"] * 12 - y["price"], m["usd"] * 12 - y["usd"]
+
+
+def describe(days):
+    return f"Подписка на Клуб «СВОИ», {days} дней"
+
+
+def receipt_item(days):
+    return f"Информационно-консультационные услуги (подписка на Клуб «СВОИ», {days} дней)"
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("svoi")
@@ -141,6 +164,11 @@ def init_db():
         """)
         # Кто провайдер подписки: rk (Робокасса/ручная) или lava
         db("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS provider TEXT DEFAULT 'rk'")
+        # Тарифы: срок каждого платежа, цена и период подписки (у старых подписок — пусто = 3000 ₽ / 30 дней)
+        db("ALTER TABLE payments ADD COLUMN IF NOT EXISTS days INTEGER DEFAULT 30")
+        db("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS price NUMERIC")
+        db("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS period_days INTEGER")
+        db("ALTER TABLE lava_invoices ADD COLUMN IF NOT EXISTS days INTEGER DEFAULT 30")
         print("База данных готова.")
     except Exception as e:
         print(f"Не удалось подключиться к базе при старте (бот продолжит работу): {e}")
@@ -202,7 +230,7 @@ def get_sub(user_id):
     try:
         row = db(
             "SELECT status, paid_until, auto_renew, first_inv_id, "
-            "COALESCE(provider, 'rk') FROM subscriptions WHERE user_id = %s",
+            "COALESCE(provider, 'rk'), price, period_days FROM subscriptions WHERE user_id = %s",
             (user_id,), fetch="one",
         )
     except Exception as e:
@@ -211,7 +239,21 @@ def get_sub(user_id):
     if not row:
         return None
     return {"status": row[0], "paid_until": row[1], "auto_renew": row[2],
-            "first_inv_id": row[3], "provider": row[4]}
+            "first_inv_id": row[3], "provider": row[4],
+            "price": row[5], "period_days": row[6]}
+
+
+def sub_terms(sub):
+    """Цена и срок, по которым продлевается подписка человека (старые — по старой цене)."""
+    days = (sub or {}).get("period_days") or PERIOD_DAYS
+    price = (sub or {}).get("price")
+    if not price and sub and sub.get("first_inv_id") and sub["first_inv_id"] > 0:
+        try:
+            row = db("SELECT amount FROM payments WHERE inv_id = %s", (sub["first_inv_id"],), fetch="one")
+            price = row[0] if row else None
+        except Exception as e:
+            log.error("sub_terms: %s", e)
+    return int(price or LEGACY_PRICE), int(days)
 
 
 def is_active(user_id):
@@ -228,13 +270,13 @@ def md5(s):
     return hashlib.md5(s.encode("utf-8")).hexdigest()
 
 
-def receipt_encoded():
+def receipt_encoded(amount, days):
     """Состав чека (номенклатура) для Робочеков СМЗ, в виде, нужном для подписи."""
     receipt = {
         "items": [{
-            "name": RECEIPT_ITEM,
+            "name": receipt_item(days),
             "quantity": 1,
-            "sum": PRICE,
+            "sum": int(amount),
             "payment_method": "full_payment",
             "payment_object": "service",
             "tax": "none",
@@ -243,26 +285,31 @@ def receipt_encoded():
     return quote(json.dumps(receipt, ensure_ascii=False, separators=(",", ":")), safe="")
 
 
-def create_payment(user_id, kind, parent_inv_id=None):
+def create_payment(user_id, kind, amount, days, parent_inv_id=None):
     row = db(
-        "INSERT INTO payments (user_id, amount, kind, parent_inv_id, is_test) "
-        "VALUES (%s, %s, %s, %s, %s) RETURNING inv_id",
-        (user_id, PRICE, kind, parent_inv_id, RK_TEST), fetch="one",
+        "INSERT INTO payments (user_id, amount, kind, parent_inv_id, is_test, days) "
+        "VALUES (%s, %s, %s, %s, %s, %s) RETURNING inv_id",
+        (user_id, amount, kind, parent_inv_id, RK_TEST, days), fetch="one",
     )
     return row[0]
 
 
-def payment_link(user_id):
-    """Создаёт платёж в базе и возвращает ссылку на страницу оплаты Робокассы."""
-    inv_id = create_payment(user_id, "initial")
+def payment_link(user_id, tariff="m", amount=None, days=None):
+    """Создаёт платёж в базе и возвращает ссылку на страницу оплаты Робокассы.
+    По умолчанию — цена тарифа; amount/days передаём, когда продлевает старый подписчик."""
+    t = TARIFFS.get(tariff, TARIFFS["m"])
+    amount = int(amount or t["price"])
+    days = int(days or t["days"])
+    out_sum = f"{amount}.00"
+    inv_id = create_payment(user_id, "initial", amount, days)
     pass1, _ = rk_passwords(RK_TEST)
-    receipt = receipt_encoded()
-    signature = md5(f"{RK_LOGIN}:{OUT_SUM}:{inv_id}:{receipt}:{pass1}")
+    receipt = receipt_encoded(amount, days)
+    signature = md5(f"{RK_LOGIN}:{out_sum}:{inv_id}:{receipt}:{pass1}")
     params = {
         "MerchantLogin": RK_LOGIN,
-        "OutSum": OUT_SUM,
+        "OutSum": out_sum,
         "InvId": inv_id,
-        "Description": DESCRIPTION,
+        "Description": describe(days),
         "Receipt": receipt,           # urlencode закодирует его ещё раз — так требует Робокасса
         "SignatureValue": signature,
         "Culture": "ru",
@@ -275,18 +322,21 @@ def payment_link(user_id):
 
 
 async def charge_recurring(user_id, first_inv_id):
-    """Автосписание за следующий период. Результат придёт на Result URL."""
-    inv_id = create_payment(user_id, "recurring", parent_inv_id=first_inv_id)
+    """Автосписание за следующий период — по цене и сроку самого человека
+    (старые подписчики остаются на прежней цене). Результат придёт на Result URL."""
+    amount, days = sub_terms(get_sub(user_id))
+    out_sum = f"{amount}.00"
+    inv_id = create_payment(user_id, "recurring", amount, days, parent_inv_id=first_inv_id)
     pass1, _ = rk_passwords(False)
-    receipt = receipt_encoded()
+    receipt = receipt_encoded(amount, days)
     data = {
         "MerchantLogin": RK_LOGIN,
         "InvoiceID": inv_id,
         "PreviousInvoiceID": first_inv_id,
-        "OutSum": OUT_SUM,
-        "Description": DESCRIPTION,
+        "OutSum": out_sum,
+        "Description": describe(days),
         "Receipt": receipt,
-        "SignatureValue": md5(f"{RK_LOGIN}:{OUT_SUM}:{inv_id}:{receipt}:{pass1}"),
+        "SignatureValue": md5(f"{RK_LOGIN}:{out_sum}:{inv_id}:{receipt}:{pass1}"),
     }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(RK_RECURRING_URL, data=data)
@@ -295,15 +345,16 @@ async def charge_recurring(user_id, first_inv_id):
 
 
 # ===== LAVA.TOP (зарубежные карты) =====
-async def lava_create_invoice(user_id, email):
+async def lava_create_invoice(user_id, email, tariff="m"):
     """Создаёт счёт в Lava и возвращает ссылку на оплату (или None).
-    Контракт запоминаем в lava_invoices, чтобы по вебхуку понять, кого впускать."""
+    Контракт запоминаем в lava_invoices, чтобы по вебхуку понять, кого впускать и на сколько дней."""
     if not LAVA_ENABLED:
         return None
+    t = TARIFFS.get(tariff, TARIFFS["m"])
     body = {
         "email": email,
         "offerId": LAVA_OFFER_ID,
-        "periodicity": LAVA_PERIODICITY,
+        "periodicity": t["lava_period"],
         "currency": LAVA_CURRENCY,
         "buyerLanguage": "RU",
     }
@@ -321,8 +372,8 @@ async def lava_create_invoice(user_id, email):
         pay_url = data.get("paymentUrl")
         if not contract_id or not pay_url:
             return None
-        db("INSERT INTO lava_invoices (contract_id, user_id, email) VALUES (%s, %s, %s) "
-           "ON CONFLICT (contract_id) DO NOTHING", (str(contract_id), user_id, email))
+        db("INSERT INTO lava_invoices (contract_id, user_id, email, days) VALUES (%s, %s, %s, %s) "
+           "ON CONFLICT (contract_id) DO NOTHING", (str(contract_id), user_id, email, t["days"]))
         return pay_url
     except Exception as e:
         log.error("lava_create_invoice: %s", e)
@@ -365,14 +416,15 @@ async def lava_list_offers():
 
 
 def lava_find_user(contract_id, parent_contract_id):
-    """Находит Telegram ID по контракту Lava (первый платёж или продление)."""
+    """Находит Telegram ID и срок тарифа (дней) по контракту Lava (первый платёж или продление)."""
     for cid in (contract_id, parent_contract_id):
         if not cid:
             continue
-        row = db("SELECT user_id FROM lava_invoices WHERE contract_id = %s", (str(cid),), fetch="one")
+        row = db("SELECT user_id, COALESCE(days, 30) FROM lava_invoices WHERE contract_id = %s",
+                 (str(cid),), fetch="one")
         if row:
-            return row[0]
-    return None
+            return row[0], row[1]
+    return None, PERIOD_DAYS
 
 
 # ===== ДОСТУП В КЛУБ =====
@@ -439,8 +491,10 @@ async def revoke_access(bot, user_id):
             await notify_admin_bot(bot, f"⚠️ Не удалось удалить <code>{user_id}</code> из <code>{chat}</code>: {e}")
 
 
-def extend_subscription(user_id, first_inv_id=None, days=PERIOD_DAYS, auto_renew=None, provider=None):
-    """Продлевает подписку от текущей даты окончания (или от сегодня)."""
+def extend_subscription(user_id, first_inv_id=None, days=PERIOD_DAYS, auto_renew=None, provider=None,
+                        price=None, period_days=None):
+    """Продлевает подписку от текущей даты окончания (или от сегодня).
+    price/period_days — запоминаем тариф (передаём при первой оплате)."""
     sub = get_sub(user_id)
     start = now_utc()
     if sub and sub["status"] == "active" and sub["paid_until"] > start:
@@ -450,15 +504,16 @@ def extend_subscription(user_id, first_inv_id=None, days=PERIOD_DAYS, auto_renew
         db(
             "UPDATE subscriptions SET status = 'active', paid_until = %s, "
             "auto_renew = COALESCE(%s, auto_renew), first_inv_id = COALESCE(%s, first_inv_id), "
-            "provider = COALESCE(%s, provider) "
+            "provider = COALESCE(%s, provider), price = COALESCE(%s, price), "
+            "period_days = COALESCE(%s, period_days) "
             "WHERE user_id = %s",
-            (paid_until, auto_renew, first_inv_id, provider, user_id),
+            (paid_until, auto_renew, first_inv_id, provider, price, period_days, user_id),
         )
     else:
         db(
-            "INSERT INTO subscriptions (user_id, status, paid_until, auto_renew, first_inv_id, provider) "
-            "VALUES (%s, 'active', %s, %s, %s, %s)",
-            (user_id, paid_until, bool(auto_renew), first_inv_id, provider or 'rk'),
+            "INSERT INTO subscriptions (user_id, status, paid_until, auto_renew, first_inv_id, provider, "
+            "price, period_days) VALUES (%s, 'active', %s, %s, %s, %s, %s, %s)",
+            (user_id, paid_until, bool(auto_renew), first_inv_id, provider or 'rk', price, period_days),
         )
     return paid_until
 
@@ -482,18 +537,19 @@ async def robokassa_result(request):
         log.warning("Неверная подпись для InvId=%s", inv_id)
         return web.Response(text="bad sign", status=400)
 
-    row = db("SELECT user_id, kind, status, parent_inv_id FROM payments WHERE inv_id = %s",
-             (int(inv_id),), fetch="one")
+    row = db("SELECT user_id, kind, status, parent_inv_id, amount, COALESCE(days, 30) "
+             "FROM payments WHERE inv_id = %s", (int(inv_id),), fetch="one")
     if not row:
         return web.Response(text="unknown invoice", status=404)
-    user_id, kind, status, parent_inv_id = row
+    user_id, kind, status, parent_inv_id, amount, days = row
 
     if status == "paid":  # повторное уведомление — просто подтверждаем
         return web.Response(text=f"OK{inv_id}")
 
     try:
-        if float(out_sum) < PRICE:
-            log.warning("Сумма меньше цены: %s", out_sum)
+        # сверяем с суммой именно этого счёта (у старых подписчиков она своя, прежняя)
+        if float(out_sum) < float(amount):
+            log.warning("Сумма меньше счёта: %s < %s", out_sum, amount)
             return web.Response(text="bad sum", status=400)
     except ValueError:
         return web.Response(text="bad sum", status=400)
@@ -505,11 +561,15 @@ async def robokassa_result(request):
     if kind == "initial":
         paid_until = extend_subscription(
             user_id,
+            days=days,
             first_inv_id=int(inv_id) if RK_RECURRING else None,
             auto_renew=True if RK_RECURRING else None,
+            provider="rk",
+            price=int(amount),
+            period_days=days,
         )
     else:
-        paid_until = extend_subscription(user_id)
+        paid_until = extend_subscription(user_id, days=days)
     sub = get_sub(user_id) or {}
 
     try:
@@ -525,9 +585,10 @@ async def robokassa_result(request):
     else:
         label = "💰 Новая оплата"
     test_mark = " (ТЕСТ)" if is_test else ""
+    period = "год" if days >= 365 else f"{days} дней"
     await notify_admin_bot(
         bot,
-        f"{label}{test_mark}: {out_sum} ₽\nID: <code>{user_id}</code>\nДо: {fmt_date(paid_until)}",
+        f"{label}{test_mark}: {rub(float(out_sum))} ₽ / {period}\nID: <code>{user_id}</code>\nДо: {fmt_date(paid_until)}",
     )
     return web.Response(text=f"OK{inv_id}")
 
@@ -554,7 +615,7 @@ async def lava_webhook(request):
     status = data.get("status", "")
     log.info("Lava webhook: event=%s contract=%s parent=%s status=%s", event, contract_id, parent_id, status)
 
-    user_id = lava_find_user(contract_id, parent_id)
+    user_id, lava_days = lava_find_user(contract_id, parent_id)
     if not user_id:
         log.warning("Lava webhook: не нашёл пользователя по контракту %s / %s (email=%s)",
                     contract_id, parent_id, email)
@@ -568,17 +629,19 @@ async def lava_webhook(request):
     # Успех: первая оплата или продление
     if ev in ("payment.success", "subscription.recurring.payment.success") or status in ("completed", "subscription-active"):
         was_active = is_active(user_id)
-        paid_until = extend_subscription(user_id, days=PERIOD_DAYS, auto_renew=True, provider="lava")
+        paid_until = extend_subscription(user_id, days=lava_days, auto_renew=True, provider="lava",
+                                         period_days=lava_days)
         # на продлении привяжем дочерний контракт к тому же пользователю (на будущее)
         if contract_id:
-            db("INSERT INTO lava_invoices (contract_id, user_id, email) VALUES (%s, %s, %s) "
-               "ON CONFLICT (contract_id) DO NOTHING", (str(contract_id), user_id, email))
+            db("INSERT INTO lava_invoices (contract_id, user_id, email, days) VALUES (%s, %s, %s, %s) "
+               "ON CONFLICT (contract_id) DO NOTHING", (str(contract_id), user_id, email, lava_days))
         try:
             await grant_access(bot, user_id, paid_until, first_payment=not was_active, auto_renew=True)
         except Exception as e:
             log.error("lava grant_access %s: %s", user_id, e)
         label = "💰 Новая оплата (Lava)" if not was_active else "🔁 Продление (Lava)"
-        await notify_admin_bot(bot, f"{label}: {email}\nID: <code>{user_id}</code>\nДо: {fmt_date(paid_until)}")
+        period = "год" if lava_days >= 365 else f"{lava_days} дней"
+        await notify_admin_bot(bot, f"{label}, {period}: {email}\nID: <code>{user_id}</code>\nДо: {fmt_date(paid_until)}")
         return web.Response(text="ok")
 
     # Отмена подписки — доступ оставляем до конца оплаченного периода, дальше billing_loop удалит
@@ -616,35 +679,42 @@ async def billing_loop(bot):
 async def billing_tick(bot):
     now = now_utc()
 
-    # 1. Напоминание за сутки до окончания периода
+    # 1. Напоминание до окончания периода: за сутки (месяц) или за 3 дня (год)
     rows = db(
         "SELECT user_id, paid_until, auto_renew AND first_inv_id IS NOT NULL FROM subscriptions "
         "WHERE status = 'active' AND paid_until > %s AND paid_until <= %s "
         "AND COALESCE(provider, 'rk') <> 'lava' "
         "AND (reminded_for IS NULL OR reminded_for <> paid_until)",
-        (now, now + timedelta(days=1)), fetch="all",
+        (now, now + timedelta(days=3)), fetch="all",
     )
     for user_id, paid_until, auto in rows:
+        sub = get_sub(user_id)
+        price, days = sub_terms(sub)
+        notice_days = 3 if days >= 365 else 1
+        if paid_until > now + timedelta(days=notice_days):
+            continue  # для месячной подписки ещё рано
         db("UPDATE subscriptions SET reminded_for = paid_until WHERE user_id = %s", (user_id,))
         if user_id == ADMIN_ID:
             continue
+        period = "следующий год" if days >= 365 else f"следующие {days} дней"
         try:
             if auto:
                 await bot.send_message(
                     user_id,
-                    f"🔔 Завтра ({fmt_date(paid_until)}) подписка на Клуб «СВОИ» продлится автоматически: "
-                    "спишется 3 000 ₽ за следующие 30 дней.\n\n"
+                    f"🔔 {fmt_date(paid_until)} подписка на Клуб «СВОИ» продлится автоматически: "
+                    f"спишется {rub(price)} ₽ за {period}.\n\n"
                     "Отключить автопродление можно в разделе «👤 Моя подписка» (/start).",
                 )
             else:
                 kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💳 Продлить картой РФ / РБ", url=payment_link(user_id))],
-                    [InlineKeyboardButton("🌍 Продлить картой не РФ", callback_data="pay_foreign")],
+                    [InlineKeyboardButton("💳 Продлить картой РФ / РБ",
+                                          url=payment_link(user_id, amount=price, days=days))],
+                    [InlineKeyboardButton("🌍 Продлить картой не РФ", callback_data="pay")],
                 ])
                 await bot.send_message(
                     user_id,
                     f"🔔 Подписка на Клуб «СВОИ» заканчивается {fmt_date(paid_until)}.\n\n"
-                    "Чтобы остаться в клубе, продлите её — 3 000 ₽ за следующие 30 дней 👇",
+                    f"Чтобы остаться в клубе, продлите её — {rub(price)} ₽ за {period} 👇",
                     reply_markup=kb,
                 )
         except Exception as e:
@@ -720,45 +790,68 @@ WELCOME_TEXT = """<b>Ты в одном шаге от входа в клуб «�
 <b>И это только начало.</b>
 Клуб будет постепенно развиваться и дополняться новыми материалами, возможностями и инструментами.
 
-💰 <b>Стоимость — 3 000 ₽ ($35) в месяц.</b>"""
+💰 <b>Стоимость — {m} ₽ (${mu}) в месяц или {y} ₽ (${yu}) за год.</b>""".format(
+    m=rub(TARIFFS["m"]["price"]), mu=TARIFFS["m"]["usd"],
+    y=rub(TARIFFS["y"]["price"]), yu=TARIFFS["y"]["usd"],
+)
 
 OFFER_URL = "https://telegra.ph/Publichnaya-oferta--Klub-SVOI-09-24"
 
-PAYMENT_TEXT = f"""💳 <b>Стоимость: 3 000 ₽ ($35) / 30 дней</b>
-Формат: ежемесячная подписка. Отписаться можно в любой момент.
+_SAVE_RUB, _SAVE_USD = year_saving()
 
-<i>Нажимая «Оплатить картой РФ / РБ» или «Оплатить картой не РФ», вы принимаете условия <a href="{OFFER_URL}">публичной оферты</a>.</i>
+PAYMENT_TEXT = f"""💳 <b>Тарифы клуба «СВОИ»</b>
+
+📅 <b>Месяц</b> — {rub(TARIFFS['m']['price'])} ₽ (${TARIFFS['m']['usd']})
+🗓 <b>Год</b> — {rub(TARIFFS['y']['price'])} ₽ (${TARIFFS['y']['usd']}) — выгода {rub(_SAVE_RUB)} ₽ (${_SAVE_USD})
+
+Подписка продлевается автоматически, отключить можно в любой момент.
+
+<i>Нажимая кнопку оплаты, вы принимаете условия <a href="{OFFER_URL}">публичной оферты</a>.</i>
 
 ⏳ Доступ в клуб откроется в течение нескольких минут после оплаты.
 
-Выберите способ оплаты 👇"""
+Выберите тариф и способ оплаты 👇"""
 
-PAY_FOREIGN_TEXT = """🌍 <b>Оплата картой не РФ — $35 / 30 дней</b>
+
+def pay_foreign_text(tariff):
+    """Ручная оплата картой не РФ (если Lava не подключена)."""
+    t = TARIFFS[tariff]
+    return f"""🌍 <b>Оплата картой не РФ — ${t['usd']} / {t['name']}</b>
 
 Freedom bank: <code>4002890062233725</code>
 (нажмите на номер, чтобы скопировать)
 
 После оплаты отправьте скриншот чека — откроем доступ в клуб в течение нескольких минут 👇"""
 
+
+def _consent_body(tariff):
+    t = TARIFFS[tariff]
+    notice = "За 3 дня" if t["days"] >= 365 else "За день"
+    return (
+        f"💳 <b>Подписка {rub(t['price'])} ₽ / {t['name']}, с автопродлением</b>\n\n"
+        f"Списывается автоматически {t['every']} по {rub(t['price'])} ₽. "
+        f"{notice} до списания придёт напоминание. "
+        "Отключить можно в любой момент в «👤 Моя подписка».\n\n"
+        f"Условия — в <a href=\"{OFFER_URL}\">публичной оферте</a>."
+    )
+
+
 # Текст согласия на автосписания (показывается, когда включены рекуррентные платежи)
-CONSENT_TEXT = f"""💳 <b>Подписка 3 000 ₽ / 30 дней, с автопродлением</b>
+def consent_text(tariff):
+    return (_consent_body(tariff) + "\n\nНажимая кнопку, вы подтверждаете:\n"
+            "<b>«Я согласен на автоматические списания согласно условиям оферты».</b>")
 
-Списывается автоматически каждые 30 дней по 3 000 ₽. За день до списания придёт напоминание. Отключить можно в любой момент в «👤 Моя подписка».
 
-Условия — в <a href="{OFFER_URL}">публичной оферте</a>.
-
-Нажимая кнопку, вы подтверждаете:
-<b>«Я согласен на автоматические списания согласно условиям оферты».</b>"""
-
-CONSENT_DONE_TEXT = f"""💳 <b>Подписка 3 000 ₽ / 30 дней, с автопродлением</b>
-
-Списывается автоматически каждые 30 дней по 3 000 ₽. За день до списания придёт напоминание. Отключить можно в любой момент в «👤 Моя подписка».
-
-Условия — в <a href="{OFFER_URL}">публичной оферте</a>.
-
-✅ Согласие зафиксировано. Нажмите «Оплатить» 👇"""
+def consent_done_text(tariff):
+    return _consent_body(tariff) + "\n\n✅ Согласие зафиксировано. Нажмите «Оплатить» 👇"
 
 CONSENT_LABEL = "Я согласен на автоматические списания согласно условиям оферты"
+
+
+def tariff_from(callback_data):
+    """'pay_foreign_y' -> 'y'. Старые кнопки без тарифа ('pay_foreign') -> месяц."""
+    suffix = callback_data.rsplit("_", 1)[-1]
+    return suffix if suffix in TARIFFS else "m"
 
 
 # ===== КЛАВИАТУРЫ =====
@@ -772,37 +865,49 @@ def main_keyboard(user_id):
     ])
 
 
-def payment_keyboard(user_id):
+def rf_button(user_id, tariff):
+    t = TARIFFS[tariff]
+    label = f"💳 {t['name'].capitalize()} · {rub(t['price'])} ₽ — карта РФ / РБ"
     # Когда включены автосписания — РФ-оплата идёт через шаг согласия (требование Робокассы)
     if RK_RECURRING:
-        rf_button = InlineKeyboardButton("💳 Оплатить картой РФ / РБ", callback_data="pay_rf_consent")
-    else:
-        try:
-            rf_button = InlineKeyboardButton("💳 Оплатить картой РФ / РБ", url=payment_link(user_id))
-        except Exception as e:
-            log.error("payment_link: %s", e)
-            rf_button = InlineKeyboardButton("💳 Оплатить картой РФ / РБ", url=f"https://t.me/{CONTACT}")
+        return InlineKeyboardButton(label, callback_data=f"pay_rf_consent_{tariff}")
+    try:
+        return InlineKeyboardButton(label, url=payment_link(user_id, tariff))
+    except Exception as e:
+        log.error("payment_link: %s", e)
+        return InlineKeyboardButton(label, url=f"https://t.me/{CONTACT}")
+
+
+def foreign_button(tariff):
+    t = TARIFFS[tariff]
+    return InlineKeyboardButton(f"🌍 {t['name'].capitalize()} · ${t['usd']} — карта не РФ",
+                                callback_data=f"pay_foreign_{tariff}")
+
+
+def payment_keyboard(user_id):
     return InlineKeyboardMarkup([
-        [rf_button],
-        [InlineKeyboardButton("🌍 Оплатить картой не РФ", callback_data="pay_foreign")],
+        [rf_button(user_id, "m")],
+        [rf_button(user_id, "y")],
+        [foreign_button("m")],
+        [foreign_button("y")],
         [InlineKeyboardButton("↗️ Служба заботы", url=f"https://t.me/{CONTACT}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
     ])
 
 
-def consent_keyboard():
+def consent_keyboard(tariff="m"):
     """Экран согласия: кнопка-согласие (callback — чтобы записать дату), оферта, назад."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Я согласен", callback_data="consent_ok")],
+        [InlineKeyboardButton("✅ Я согласен", callback_data=f"consent_ok_{tariff}")],
         [InlineKeyboardButton("📄 Оферта", url=OFFER_URL)],
         [InlineKeyboardButton("⬅️ Назад", callback_data="pay")],
     ])
 
 
-def pay_now_keyboard(user_id):
+def pay_now_keyboard(user_id, tariff="m"):
     """После согласия — кнопка оплаты (заменяет кнопку согласия на том же экране)."""
     try:
-        pay_url = payment_link(user_id)
+        pay_url = payment_link(user_id, tariff)
     except Exception as e:
         log.error("payment_link: %s", e)
         pay_url = f"https://t.me/{CONTACT}"
@@ -840,7 +945,10 @@ def my_sub_view(user_id):
         rows.append([InlineKeyboardButton("↗️ Служба заботы", url=f"https://t.me/{CONTACT}")])
         rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
         return text, InlineKeyboardMarkup(rows)
+    price, days = sub_terms(sub)
+    period = "год" if days >= 365 else f"{days} дней"
     if sub["first_inv_id"]:
+        text += f"Тариф: <b>{rub(price)} ₽ / {period}</b>\n"
         if sub["auto_renew"]:
             text += "Автопродление: <b>включено</b>"
             rows.append([InlineKeyboardButton("⏸ Отключить автопродление", callback_data="renew_off")])
@@ -848,7 +956,7 @@ def my_sub_view(user_id):
             text += "Автопродление: <b>выключено</b> — доступ закроется в дату окончания."
             rows.append([InlineKeyboardButton("▶️ Включить автопродление", callback_data="renew_on")])
     else:
-        text += "Автопродления нет — за день до окончания пришлём напоминание."
+        text += "Автопродления нет — перед окончанием пришлём напоминание."
         rows.append([InlineKeyboardButton("💳 Продлить подписку", callback_data="pay")])
     rows.append([InlineKeyboardButton("↗️ Служба заботы", url=f"https://t.me/{CONTACT}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
@@ -919,36 +1027,43 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             PAYMENT_TEXT, parse_mode="HTML",
             reply_markup=payment_keyboard(user.id), disable_web_page_preview=True,
         )
-    elif query.data == "pay_rf_consent":
+    elif query.data.startswith("pay_rf_consent"):
         # Экран согласия на автосписания (только когда включены рекуррентные платежи)
+        tariff = tariff_from(query.data)
         await query.message.reply_text(
-            CONSENT_TEXT, parse_mode="HTML",
-            reply_markup=consent_keyboard(), disable_web_page_preview=True,
+            consent_text(tariff), parse_mode="HTML",
+            reply_markup=consent_keyboard(tariff), disable_web_page_preview=True,
         )
-    elif query.data == "consent_ok":
+    elif query.data.startswith("consent_ok"):
         # Фиксируем согласие с датой и МЕНЯЕМ ТОТ ЖЕ экран на кнопку оплаты
+        tariff = tariff_from(query.data)
+        t = TARIFFS[tariff]
+        consent_record = f"{CONSENT_LABEL} (тариф: {rub(t['price'])} ₽ / {t['name']})"
         try:
-            db("INSERT INTO consents (user_id, text) VALUES (%s, %s)", (user.id, CONSENT_LABEL))
+            db("INSERT INTO consents (user_id, text) VALUES (%s, %s)", (user.id, consent_record))
         except Exception as e:
             log.error("consent save: %s", e)
-        await notify_admin(context, f"✍️ Согласие на автосписание\n\n{user_info(user)}")
+        await notify_admin(context, f"✍️ Согласие на автосписание — {t['name']}\n\n{user_info(user)}")
         try:
             await query.edit_message_text(
-                CONSENT_DONE_TEXT, parse_mode="HTML",
-                reply_markup=pay_now_keyboard(user.id), disable_web_page_preview=True,
+                consent_done_text(tariff), parse_mode="HTML",
+                reply_markup=pay_now_keyboard(user.id, tariff), disable_web_page_preview=True,
             )
         except Exception as e:
             # запасной путь, если сообщение не удалось отредактировать
             log.error("consent edit: %s", e)
             await query.message.reply_text(
-                CONSENT_DONE_TEXT, parse_mode="HTML",
-                reply_markup=pay_now_keyboard(user.id), disable_web_page_preview=True,
+                consent_done_text(tariff), parse_mode="HTML",
+                reply_markup=pay_now_keyboard(user.id, tariff), disable_web_page_preview=True,
             )
-    elif query.data == "pay_foreign":
+    elif query.data.startswith("pay_foreign"):
+        tariff = tariff_from(query.data)
+        t = TARIFFS[tariff]
         if LAVA_ENABLED:
             context.user_data["await_lava_email"] = True
+            context.user_data["lava_tariff"] = tariff
             await query.message.reply_text(
-                "🌍 <b>Оплата картой не РФ — $35 / 30 дней</b>, с автопродлением.\n\n"
+                f"🌍 <b>Оплата картой не РФ — ${t['usd']} / {t['name']}</b>, с автопродлением.\n\n"
                 "Для оплаты и чека укажите ваш <b>email</b> — пришлите его ответным сообщением 👇\n\n"
                 f"Оплачивая, вы принимаете условия <a href=\"{OFFER_URL}\">публичной оферты</a>.",
                 parse_mode="HTML", disable_web_page_preview=True,
@@ -956,11 +1071,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await notify_admin(
                 context,
-                f"🔥 <b>Хочет оплатить картой не РФ!</b>\n\n{user_info(user)}\n\n"
-                f"После скриншота выдай доступ: <code>/grant {user.id} 30</code>",
+                f"🔥 <b>Хочет оплатить картой не РФ ({t['name']}, ${t['usd']})!</b>\n\n{user_info(user)}\n\n"
+                f"После скриншота выдай доступ: <code>/grant {user.id} {t['days']}</code>",
             )
             await query.message.reply_text(
-                PAY_FOREIGN_TEXT, parse_mode="HTML",
+                pay_foreign_text(tariff), parse_mode="HTML",
                 reply_markup=foreign_keyboard(), disable_web_page_preview=True,
             )
     elif query.data == "my_sub":
@@ -1004,6 +1119,9 @@ async def help_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🆔 Узнать ID канала: перешли сюда любой пост из канала.\n"
         "🆔 Узнать ID чата: напиши в чате <code>/chatid</code>\n\n"
         "/lavaoffers — показать продукты Lava и их offerId (для зарубежных карт)\n\n"
+        f"Тарифы для новых: месяц {rub(TARIFFS['m']['price'])} ₽ / ${TARIFFS['m']['usd']}, "
+        f"год {rub(TARIFFS['y']['price'])} ₽ / ${TARIFFS['y']['usd']}\n"
+        f"Старые подписчики продлеваются по своей прежней цене.\n"
         f"Режим оплаты: {mode}\n"
         f"Автосписания (Робокасса): {'✅ включены' if RK_RECURRING else '⏸ выключены (продление по напоминанию)'}\n"
         f"Lava (зарубежные): {'✅ подключена' if LAVA_ENABLED else '❌ не задана (LAVA_API_KEY/LAVA_OFFER_ID)'}\n"
@@ -1089,9 +1207,10 @@ async def preview_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать экран согласия для скриншота (не влияет на оплату)."""
     if not is_admin(update):
         return
+    tariff = "y" if context.args and context.args[0] == "y" else "m"
     await update.message.reply_text(
-        CONSENT_TEXT, parse_mode="HTML",
-        reply_markup=consent_keyboard(), disable_web_page_preview=True,
+        consent_text(tariff), parse_mode="HTML",
+        reply_markup=consent_keyboard(tariff), disable_web_page_preview=True,
     )
 
 
@@ -1269,12 +1388,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Похоже, это не email. Пришлите адрес вида name@mail.com 👇")
             return
         context.user_data.pop("await_lava_email", None)
+        tariff = context.user_data.pop("lava_tariff", "m")
         await update.message.reply_text("Создаю ссылку на оплату... ⏳")
-        pay_url = await lava_create_invoice(user_id, email)
+        pay_url = await lava_create_invoice(user_id, email, tariff)
         if pay_url:
+            t = TARIFFS[tariff]
             await notify_admin_bot(
                 context.bot,
-                f"🌍 Оформляет подписку через Lava\n{user_info(update.effective_user)}\nEmail: {email}",
+                f"🌍 Оформляет подписку через Lava ({t['name']}, ${t['usd']})\n"
+                f"{user_info(update.effective_user)}\nEmail: {email}",
             )
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("💳 Оплатить", url=pay_url)],
