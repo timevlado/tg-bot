@@ -733,7 +733,7 @@ async def billing_tick(bot):
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("💳 Продлить картой РФ / РБ",
                                           url=payment_link(user_id, amount=price, days=days))],
-                    [InlineKeyboardButton("🌍 Продлить картой не РФ", callback_data="pay")],
+                    [InlineKeyboardButton("🌍 Продлить международной картой", callback_data="pay_intl")],
                 ])
                 await bot.send_message(
                     user_id,
@@ -816,7 +816,7 @@ WELCOME_TEXT = """<b>Ты в одном шаге от входа в клуб «�
 Голосования, совместные решения и другие интересные форматы.
 
 🎓 <b>Академия</b>
-Большой многочасовой видеокурс о том, как самостоятельно анализировать матчи.
+Большой курс о том, как самостоятельно анализировать матчи.
 
 🤖 <b>AI и инструменты</b>
 Как применять ИИ и другие полезные инструменты в нашей сфере.
@@ -838,20 +838,26 @@ PAYMENT_TEXT = f"""💳 <b>Тарифы клуба «СВОИ»</b>
 📅 <b>Месяц</b> — {rub(TARIFFS['m']['price'])} ₽ (${TARIFFS['m']['usd']})
 🗓 <b>Год</b> — {rub(TARIFFS['y']['price'])} ₽ (${TARIFFS['y']['usd']}) — выгода {rub(_SAVE_RUB)} ₽ (${_SAVE_USD})
 
-Картой РФ / РБ — с автопродлением, отключить можно в любой момент.
-{"Картой не РФ — тоже с автопродлением (через Lava)." if LAVA_NEW_SALES else "Картой не РФ — разовая оплата за выбранный срок."}
-
 <i>Нажимая кнопку оплаты, вы принимаете условия <a href="{OFFER_URL}">публичной оферты</a>.</i>
 
 ⏳ Доступ в клуб откроется в течение нескольких минут после оплаты.
 
-Выберите тариф и способ оплаты 👇"""
+Выберите способ оплаты 👇"""
+
+# Шаг 2: выбор тарифа после выбора карты
+RF_CHOOSE_TEXT = ("💳 <b>Оплата картой РФ / РБ</b>\n\n"
+                  + ("Подписка с автопродлением — отключить можно в любой момент.\n\n" if RK_RECURRING else "")
+                  + "Выберите тариф 👇")
+INTL_CHOOSE_TEXT = ("🌍 <b>Оплата международной картой</b>\n\n"
+                    + ("Подписка с автопродлением.\n\n" if LAVA_NEW_SALES
+                       else "Разовая оплата за выбранный срок, без автопродления.\n\n")
+                    + "Выберите тариф 👇")
 
 
 def pay_foreign_text(tariff):
-    """Ручная оплата картой не РФ (если Lava не подключена)."""
+    """Ручная оплата международной картой (если новые продажи через Lava выключены)."""
     t = TARIFFS[tariff]
-    return f"""🌍 <b>Оплата картой не РФ — ${t['usd']} / {t['name']}</b>
+    return f"""🌍 <b>Оплата международной картой — ${t['usd']} / {t['name']}</b>
 Разовый платёж за {t['days']} дней, без автопродления.
 
 Freedom bank: <code>4002890062233725</code>
@@ -901,9 +907,12 @@ def main_keyboard(user_id):
     ])
 
 
+TARIFF_ICON = {"m": "📅", "y": "🗓"}
+
+
 def rf_button(user_id, tariff):
     t = TARIFFS[tariff]
-    label = f"💳 {t['name'].capitalize()} · {rub(t['price'])} ₽ — карта РФ / РБ"
+    label = f"{TARIFF_ICON[tariff]} {t['name'].capitalize()} — {rub(t['price'])} ₽"
     # Когда включены автосписания — РФ-оплата идёт через шаг согласия (требование Робокассы)
     if RK_RECURRING:
         return InlineKeyboardButton(label, callback_data=f"pay_rf_consent_{tariff}")
@@ -916,18 +925,35 @@ def rf_button(user_id, tariff):
 
 def foreign_button(tariff):
     t = TARIFFS[tariff]
-    return InlineKeyboardButton(f"🌍 {t['name'].capitalize()} · ${t['usd']} — карта не РФ",
+    return InlineKeyboardButton(f"{TARIFF_ICON[tariff]} {t['name'].capitalize()} — ${t['usd']}",
                                 callback_data=f"pay_foreign_{tariff}")
 
 
 def payment_keyboard(user_id):
+    """Шаг 1: выбор карты."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 Оплатить картой РФ / РБ", callback_data="pay_rf")],
+        [InlineKeyboardButton("🌍 Оплатить международной картой", callback_data="pay_intl")],
+        [InlineKeyboardButton("↗️ Служба заботы", url=f"https://t.me/{CONTACT}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+    ])
+
+
+def rf_tariff_keyboard(user_id):
+    """Шаг 2 для карты РФ / РБ: месяц или год."""
     return InlineKeyboardMarkup([
         [rf_button(user_id, "m")],
         [rf_button(user_id, "y")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="pay_back")],
+    ])
+
+
+def intl_tariff_keyboard():
+    """Шаг 2 для международной карты: месяц или год."""
+    return InlineKeyboardMarkup([
         [foreign_button("m")],
         [foreign_button("y")],
-        [InlineKeyboardButton("↗️ Служба заботы", url=f"https://t.me/{CONTACT}")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="pay_back")],
     ])
 
 
@@ -936,7 +962,7 @@ def consent_keyboard(tariff="m"):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Я согласен", callback_data=f"consent_ok_{tariff}")],
         [InlineKeyboardButton("📄 Оферта", url=OFFER_URL)],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="pay")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="pay_rf")],
     ])
 
 
@@ -957,7 +983,7 @@ def foreign_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📸 Отправить скриншот", url=f"https://t.me/{CONTACT}")],
         [InlineKeyboardButton("↗️ Служба заботы", url=f"https://t.me/{CONTACT}")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="pay")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="pay_intl")],
     ])
 
 
@@ -1037,6 +1063,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def show_screen(query, text, kb):
+    """Меняет экран в том же сообщении (чтобы чат не засорялся); если не вышло — новым сообщением."""
+    try:
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+    except Exception as e:
+        if "not modified" in str(e).lower():
+            return
+        log.warning("edit screen: %s", e)
+        await query.message.reply_text(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
@@ -1063,13 +1100,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             PAYMENT_TEXT, parse_mode="HTML",
             reply_markup=payment_keyboard(user.id), disable_web_page_preview=True,
         )
+    elif query.data == "pay_back":
+        # «Назад» с выбора тарифа — возвращаем экран тарифов в том же сообщении
+        await show_screen(query, PAYMENT_TEXT, payment_keyboard(user.id))
+    elif query.data in ("pay_rf", "pay_rf_consent"):
+        # Шаг 2: карта РФ / РБ — выбор месяц/год («pay_rf_consent» — старые кнопки в чатах)
+        await show_screen(query, RF_CHOOSE_TEXT, rf_tariff_keyboard(user.id))
+    elif query.data in ("pay_intl", "pay_foreign"):
+        # Шаг 2: международная карта — выбор месяц/год («pay_foreign» — старые кнопки в чатах)
+        await show_screen(query, INTL_CHOOSE_TEXT, intl_tariff_keyboard())
     elif query.data.startswith("pay_rf_consent"):
         # Экран согласия на автосписания (только когда включены рекуррентные платежи)
         tariff = tariff_from(query.data)
-        await query.message.reply_text(
-            consent_text(tariff), parse_mode="HTML",
-            reply_markup=consent_keyboard(tariff), disable_web_page_preview=True,
-        )
+        await show_screen(query, consent_text(tariff), consent_keyboard(tariff))
     elif query.data.startswith("consent_ok"):
         # Фиксируем согласие с датой и МЕНЯЕМ ТОТ ЖЕ экран на кнопку оплаты
         tariff = tariff_from(query.data)
@@ -1098,22 +1141,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if LAVA_ENABLED and LAVA_NEW_SALES:
             context.user_data["await_lava_email"] = True
             context.user_data["lava_tariff"] = tariff
-            await query.message.reply_text(
-                f"🌍 <b>Оплата картой не РФ — ${t['usd']} / {t['name']}</b>, с автопродлением.\n\n"
+            await show_screen(
+                query,
+                f"🌍 <b>Оплата международной картой — ${t['usd']} / {t['name']}</b>, с автопродлением.\n\n"
                 "Для оплаты и чека укажите ваш <b>email</b> — пришлите его ответным сообщением 👇\n\n"
                 f"Оплачивая, вы принимаете условия <a href=\"{OFFER_URL}\">публичной оферты</a>.",
-                parse_mode="HTML", disable_web_page_preview=True,
+                None,
             )
         else:
             await notify_admin(
                 context,
-                f"🔥 <b>Хочет оплатить картой не РФ ({t['name']}, ${t['usd']})!</b>\n\n{user_info(user)}\n\n"
+                f"🔥 <b>Хочет оплатить международной картой ({t['name']}, ${t['usd']})!</b>\n\n{user_info(user)}\n\n"
                 f"После скриншота выдай доступ: <code>/grant {user.id} {t['days']}</code>",
             )
-            await query.message.reply_text(
-                pay_foreign_text(tariff), parse_mode="HTML",
-                reply_markup=foreign_keyboard(), disable_web_page_preview=True,
-            )
+            await show_screen(query, pay_foreign_text(tariff), foreign_keyboard())
     elif query.data == "my_sub":
         text, kb = my_sub_view(user.id)
         await query.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
@@ -1148,7 +1189,7 @@ async def help_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/post — рассылка с выбором группы (всем / не оплативших / ушедших / активных).\n"
         "Выбери кнопкой кому → пришли сообщение (текст, фото, видео, кружок, голосовое) → подтверди.\n"
         "Оформление (жирный, курсив, ссылки) сохраняется.\n\n"
-        "/grant <i>ID дней</i> — выдать доступ вручную (оплата картой не РФ)\n"
+        "/grant <i>ID дней</i> — выдать доступ вручную (оплата международной картой)\n"
         "Пример: <code>/grant 123456789 30</code>\n"
         "/revoke <i>ID</i> — закрыть доступ и удалить из клуба\n\n"
         "/msg <i>ID текст</i> — написать клиенту от имени бота (если у него нет username)\n\n"
