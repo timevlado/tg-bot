@@ -819,7 +819,7 @@ async def billing_tick(bot):
 WELCOME_TEXT = """<b>Ты в одном шаге от входа в клуб «СВОИ»</b>
 
 <b>Что будет внутри?</b>
-<blockquote expandable>🔥 <b>Прогнозы</b>
+<blockquote>🔥 <b>Прогнозы</b>
 По линии и в лайве.
 
 👀 <b>Наблюдения</b>
