@@ -1063,13 +1063,13 @@ async def notify_admin(context, text):
     await notify_admin_bot(context.bot, text)
 
 
-# ===== ПРИВЕТСТВИЕ С ВИДЕО =====
-# Видео сверху (без отдельной обложки), под ним текст и кнопки.
-# Стандартный ролик (media/welcome.mp4) загружаем в Telegram КАЖДЫЙ раз заново, а не по file_id:
-# так он у Влада запускался в чате сам (на тесте), а по file_id — требовал нажатия.
-# Настройка welcome_video — замена от админа (/setvideo: свой file_id или "off").
+# ===== ПРИВЕТСТВИЕ С РОЛИКОМ =====
+# Ролик сверху, под ним текст и кнопки — одним сообщением.
+# Ролик отправляем АНИМАЦИЕЙ (как GIF, без звука): такие Telegram запускает сам и по кругу везде —
+# и на телефоне, и на компьютере. Обычное видео от бота у многих требует нажатия.
+# Настройка welcome_video — замена от админа (/setvideo): "anim:<file_id>", "video:<file_id>" или "off".
 MEDIA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
-WELCOME_VIDEO_PATH = os.path.join(MEDIA_DIR, "welcome.mp4")
+WELCOME_ANIM_PATH = os.path.join(MEDIA_DIR, "welcome_anim.mp4")
 WELCOME_THUMB_PATH = os.path.join(MEDIA_DIR, "welcome_thumb.jpg")
 
 
@@ -1084,33 +1084,34 @@ def migrate_welcome_settings():
 
 
 async def send_welcome(bot, chat_id, user_id):
-    override = get_setting("welcome_video")          # свой file_id от админа, "off" или пусто
+    override = get_setting("welcome_video")          # замена от админа, "off" или пусто (= стандартный ролик)
     if override != "off":
         files = []
         try:
-            kwargs = {}
-            video = override
-            if not video and os.path.exists(WELCOME_VIDEO_PATH):
-                video = open(WELCOME_VIDEO_PATH, "rb")
-                files.append(video)
-                kwargs.update(width=1280, height=720, duration=22, supports_streaming=True)
+            common = dict(caption=WELCOME_TEXT, parse_mode="HTML", reply_markup=main_keyboard(user_id))
+            if override and override.startswith("video:"):
+                await bot.send_video(chat_id, video=override[6:], **common)
+                return
+            if override:
+                await bot.send_animation(chat_id, animation=override.removeprefix("anim:"), **common)
+                return
+            if os.path.exists(WELCOME_ANIM_PATH):
+                anim = open(WELCOME_ANIM_PATH, "rb")
+                files.append(anim)
+                extra = dict(width=1280, height=720, duration=22)
                 if os.path.exists(WELCOME_THUMB_PATH):
                     files.append(open(WELCOME_THUMB_PATH, "rb"))
-                    kwargs["thumbnail"] = files[-1]
-            if video:
-                await bot.send_video(
-                    chat_id, video=video, caption=WELCOME_TEXT, parse_mode="HTML",
-                    reply_markup=main_keyboard(user_id), **kwargs,
-                )
+                    extra["thumbnail"] = files[-1]
+                await bot.send_animation(chat_id, animation=anim, **extra, **common)
                 return
         except Exception as e:
             log.warning("welcome video: %s", e)
             if override and "file" in str(e).lower():
-                set_setting("welcome_video", None)   # видео от админа испорчено — вернём стандартный ролик
+                set_setting("welcome_video", None)   # ролик от админа испорчен — вернём стандартный
         finally:
             for f in files:
                 f.close()
-    # Без видео (или если видео не отправилось) — просто текст
+    # Без ролика (или если он не отправился) — просто текст
     try:
         await bot.send_message(chat_id, WELCOME_TEXT, parse_mode="HTML",
                                reply_markup=main_keyboard(user_id), disable_web_page_preview=True)
@@ -1122,35 +1123,39 @@ async def send_welcome(bot, chat_id, user_id):
 
 
 async def setvideo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/setvideo — заменить видео в приветствии; /setvideo off — выключить; /setvideo default — вернуть стандартное."""
+    """/setvideo — заменить ролик в приветствии; /setvideo off — выключить; /setvideo default — вернуть стандартный."""
     if not is_admin(update):
         return
     arg = (context.args[0].lower() if context.args else "")
     if arg == "off":
         set_setting("welcome_video", "off")
-        await update.message.reply_text("⏹ Видео в приветствии выключено. Вернуть: /setvideo default")
+        await update.message.reply_text("⏹ Ролик в приветствии выключен. Вернуть: /setvideo default")
         return
     if arg == "default":
         set_setting("welcome_video", None)
-        await update.message.reply_text("✅ Вернул стандартное видео. Вот как выглядит /start:")
+        await update.message.reply_text("✅ Вернул стандартный ролик. Вот как выглядит /start:")
         await send_welcome(context.bot, update.effective_chat.id, update.effective_user.id)
         return
     context.user_data["await_welcome_video"] = True
     await update.message.reply_text(
-        "Пришли видео для приветствия (обычным видео, лучше горизонтальное и до минуты).\n\n"
-        "Выключить видео: /setvideo off\nВернуть стандартное: /setvideo default\nОтмена: /start"
+        "Пришли ролик для приветствия.\n\n"
+        "• GIF / видео без звука — будет играть сам у всех\n"
+        "• обычное видео со звуком — у многих нужно будет нажать, чтобы запустить\n\n"
+        "Выключить ролик: /setvideo off\nВернуть стандартный: /setvideo default\nОтмена: /start"
     )
 
 
 async def save_welcome_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Админ прислал видео после /setvideo."""
-    video = update.message.video
-    if not video:
-        await update.message.reply_text("Это не видео. Пришли видео-файл или отмени: /start")
+    """Админ прислал ролик после /setvideo."""
+    msg = update.message
+    anim = getattr(msg, "animation", None)
+    video = getattr(msg, "video", None)
+    if not anim and not video:
+        await msg.reply_text("Это не видео. Пришли видео или GIF, либо отмени: /start")
         return
     context.user_data.pop("await_welcome_video", None)
-    set_setting("welcome_video", video.file_id)
-    await update.message.reply_text("✅ Видео в приветствии заменено. Вот как теперь выглядит /start:")
+    set_setting("welcome_video", f"anim:{anim.file_id}" if anim else f"video:{video.file_id}")
+    await msg.reply_text("✅ Ролик в приветствии заменён. Вот как теперь выглядит /start:")
     await send_welcome(context.bot, update.effective_chat.id, update.effective_user.id)
 
 
@@ -1305,7 +1310,7 @@ async def help_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🆔 Узнать ID канала: перешли сюда любой пост из канала.\n"
         "🆔 Узнать ID чата: напиши в чате <code>/chatid</code>\n\n"
         "/lavaoffers — показать продукты Lava и их offerId (для зарубежных карт)\n\n"
-        "/setvideo — заменить видео в приветствии (/setvideo off — выключить, /setvideo default — вернуть стандартное)\n\n"
+        "/setvideo — заменить ролик в приветствии (/setvideo off — выключить, /setvideo default — вернуть стандартный)\n\n"
         f"Тарифы для новых: месяц {rub(TARIFFS['m']['price'])} ₽ / ${TARIFFS['m']['usd']}, "
         f"год {rub(TARIFFS['y']['price'])} ₽ / ${TARIFFS['y']['usd']}\n"
         f"Старые подписчики продлеваются по своей прежней цене.\n"
