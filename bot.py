@@ -44,6 +44,10 @@ LAVA_PAYMENT_METHOD = os.environ.get("LAVA_PAYMENT_METHOD", "").strip()  # пу�
 LAVA_INVOICE_URL = "https://gate.lava.top/api/v2/invoice"
 LAVA_PRODUCTS_URL = "https://gate.lava.top/api/v2/products"
 LAVA_ENABLED = bool(LAVA_API_KEY and LAVA_OFFER_ID)
+# Новые продажи через Lava. Пока выключены (проблема с выводом денег) — новые зарубежные клиенты платят
+# переводом на Freedom. Продления СТАРЫХ подписчиков Lava бот принимает всегда (вебхук работает).
+# Включить обратно: в Railway → Variables добавить LAVA_NEW_SALES = 1
+LAVA_NEW_SALES = os.environ.get("LAVA_NEW_SALES", "0").strip() == "1"
 
 # Клуб: ID закрытого канала и чата комментариев (узнаём через бота, см. /help)
 CLUB_CHANNEL_ID = os.environ.get("CLUB_CHANNEL_ID", "").strip()
@@ -705,7 +709,8 @@ async def billing_tick(bot):
                     f"спишется {rub(price)} ₽ за {period}.\n\n"
                     "Отключить автопродление можно в разделе «👤 Моя подписка» (/start).",
                 )
-            else:
+            elif sub and sub.get("price"):
+                # платил картой РФ без автопродления — продление по его цене
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("💳 Продлить картой РФ / РБ",
                                           url=payment_link(user_id, amount=price, days=days))],
@@ -715,6 +720,15 @@ async def billing_tick(bot):
                     user_id,
                     f"🔔 Подписка на Клуб «СВОИ» заканчивается {fmt_date(paid_until)}.\n\n"
                     f"Чтобы остаться в клубе, продлите её — {rub(price)} ₽ за {period} 👇",
+                    reply_markup=kb,
+                )
+            else:
+                # доступ выдан вручную (/grant) — показываем тарифы
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("💳 Продлить подписку", callback_data="pay")]])
+                await bot.send_message(
+                    user_id,
+                    f"🔔 Подписка на Клуб «СВОИ» заканчивается {fmt_date(paid_until)}.\n\n"
+                    "Чтобы остаться в клубе, продлите её 👇",
                     reply_markup=kb,
                 )
         except Exception as e:
@@ -1059,7 +1073,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("pay_foreign"):
         tariff = tariff_from(query.data)
         t = TARIFFS[tariff]
-        if LAVA_ENABLED:
+        if LAVA_ENABLED and LAVA_NEW_SALES:
             context.user_data["await_lava_email"] = True
             context.user_data["lava_tariff"] = tariff
             await query.message.reply_text(
@@ -1124,7 +1138,8 @@ async def help_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Старые подписчики продлеваются по своей прежней цене.\n"
         f"Режим оплаты: {mode}\n"
         f"Автосписания (Робокасса): {'✅ включены' if RK_RECURRING else '⏸ выключены (продление по напоминанию)'}\n"
-        f"Lava (зарубежные): {'✅ подключена' if LAVA_ENABLED else '❌ не задана (LAVA_API_KEY/LAVA_OFFER_ID)'}\n"
+        f"Lava (зарубежные): {'✅ подключена' if LAVA_ENABLED else '❌ не задана (LAVA_API_KEY/LAVA_OFFER_ID)'}"
+        f"{'' if LAVA_NEW_SALES else ' — новые продажи выключены, новые платят на Freedom; старые продлеваются'}\n"
         f"Канал: {CLUB_CHANNEL_ID or '❌ не задан'}\n"
         f"Чат: {CLUB_CHAT_ID or '❌ не задан'}"
     )
@@ -1146,9 +1161,15 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = int(context.args[0])
         days = int(context.args[1]) if len(context.args) > 1 else PERIOD_DAYS
     except (IndexError, ValueError):
-        await update.message.reply_text("Используй: /grant ID дней\nПример: /grant 123456789 30")
+        await update.message.reply_text("Используй: /grant ID дней\nПример: /grant 123456789 30 (месяц) или 365 (год)")
         return
-    paid_until = extend_subscription(user_id, days=days, auto_renew=False)
+    sub = get_sub(user_id)
+    has_tariff = bool(sub and (sub.get("first_inv_id") or sub.get("price")))
+    if has_tariff:
+        # подарок дней тому, кто платил картой (с автосписанием или без): тариф и автопродление не трогаем
+        paid_until = extend_subscription(user_id, days=days)
+    else:
+        paid_until = extend_subscription(user_id, days=days, auto_renew=False, period_days=days)
     try:
         await grant_access(context.bot, user_id, paid_until, first_payment=True)
         await update.message.reply_text(f"✅ Доступ выдан до {fmt_date(paid_until)}, ссылка отправлена.")
