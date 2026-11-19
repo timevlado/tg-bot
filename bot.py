@@ -1170,6 +1170,49 @@ async def save_welcome_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await send_welcome(context.bot, update.effective_chat.id, update.effective_user.id)
 
 
+async def testvideo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Временная команда: показать ролик в 4 вариантах, чтобы выбрать, какой запускается сам."""
+    if not is_admin(update):
+        return
+    bot, chat, uid = context.bot, update.effective_chat.id, update.effective_user.id
+    test_dir = os.path.join(MEDIA_DIR, "test")
+
+    async def label(text):
+        await bot.send_message(chat, text, parse_mode="HTML")
+
+
+    async def v1():
+        await label("1️⃣ <b>Видео с обложкой</b> — как сейчас")
+        await send_welcome(bot, chat, uid)
+
+    async def v2():
+        await label("2️⃣ <b>Видео без обложки</b>")
+        with open(WELCOME_VIDEO_PATH, "rb") as f, open(WELCOME_THUMB_PATH, "rb") as th:
+            await bot.send_video(chat, video=f, thumbnail=th, width=1280, height=720, duration=22,
+                                 supports_streaming=True, caption=WELCOME_TEXT, parse_mode="HTML",
+                                 reply_markup=main_keyboard(uid))
+
+    async def v3():
+        await label("3️⃣ <b>Анимация (GIF)</b> — играет сама везде, но без звука")
+        with open(os.path.join(test_dir, "welcome_gif.mp4"), "rb") as f, open(WELCOME_THUMB_PATH, "rb") as th:
+            await bot.send_animation(chat, animation=f, thumbnail=th, width=1280, height=720, duration=22,
+                                     caption=WELCOME_TEXT, parse_mode="HTML", reply_markup=main_keyboard(uid))
+
+    async def v4():
+        await label("4️⃣ <b>Кругляшок</b> — в чате без звука, нажал — со звуком. Текст отдельным сообщением")
+        with open(os.path.join(test_dir, "welcome_round.mp4"), "rb") as f:
+            await bot.send_video_note(chat, video_note=f, length=640, duration=22)
+        await bot.send_message(chat, WELCOME_TEXT, parse_mode="HTML",
+                               reply_markup=main_keyboard(uid), disable_web_page_preview=True)
+
+    await update.message.reply_text("Отправляю 4 варианта… ⏳ Посмотри на телефоне и на компьютере, какой запускается сам.")
+    for n, step in enumerate((v1, v2, v3, v4), 1):
+        try:
+            await step()
+        except Exception as e:
+            await label(f"⚠️ Вариант {n} не отправился: {e}")
+
+
 # ===== ОБРАБОТЧИКИ =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1670,6 +1713,7 @@ def main():
     app.add_handler(CommandHandler("preview", preview_cmd, filters=private & admin))
     app.add_handler(CommandHandler("demosub", demosub_cmd, filters=private & admin))
     app.add_handler(CommandHandler("setvideo", setvideo_cmd, filters=private & admin))
+    app.add_handler(CommandHandler("testvideo", testvideo_cmd, filters=private & admin))
     app.add_handler(CallbackQueryHandler(button_handler))
     # Пересланный пост из канала — показать ID (только когда НЕ идёт рассылка)
     app.add_handler(MessageHandler(private & admin & filters.FORWARDED, forwarded_or_broadcast))
