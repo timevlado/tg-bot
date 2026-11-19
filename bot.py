@@ -1064,10 +1064,10 @@ async def notify_admin(context, text):
 
 
 # ===== ПРИВЕТСТВИЕ С ВИДЕО =====
-# Видео сверху (без отдельной обложки — так Telegram запускает его в чате сам), под ним текст и кнопки.
-# Файл лежит в репозитории (media/), после первой отправки Telegram выдаёт file_id — дальше шлём по нему (мгновенно).
-# Настройки: welcome_video — замена от админа (/setvideo: свой file_id или "off"),
-#            welcome_video_cache — file_id стандартного ролика после первой загрузки.
+# Видео сверху (без отдельной обложки), под ним текст и кнопки.
+# Стандартный ролик (media/welcome.mp4) загружаем в Telegram КАЖДЫЙ раз заново, а не по file_id:
+# так он у Влада запускался в чате сам (на тесте), а по file_id — требовал нажатия.
+# Настройка welcome_video — замена от админа (/setvideo: свой file_id или "off").
 MEDIA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
 WELCOME_VIDEO_PATH = os.path.join(MEDIA_DIR, "welcome.mp4")
 WELCOME_THUMB_PATH = os.path.join(MEDIA_DIR, "welcome_thumb.jpg")
@@ -1087,10 +1087,9 @@ async def send_welcome(bot, chat_id, user_id):
     override = get_setting("welcome_video")          # свой file_id от админа, "off" или пусто
     if override != "off":
         files = []
-        key = "welcome_video" if override else "welcome_video_cache"
         try:
             kwargs = {}
-            video = override or get_setting("welcome_video_cache")
+            video = override
             if not video and os.path.exists(WELCOME_VIDEO_PATH):
                 video = open(WELCOME_VIDEO_PATH, "rb")
                 files.append(video)
@@ -1099,18 +1098,15 @@ async def send_welcome(bot, chat_id, user_id):
                     files.append(open(WELCOME_THUMB_PATH, "rb"))
                     kwargs["thumbnail"] = files[-1]
             if video:
-                msg = await bot.send_video(
+                await bot.send_video(
                     chat_id, video=video, caption=WELCOME_TEXT, parse_mode="HTML",
                     reply_markup=main_keyboard(user_id), **kwargs,
                 )
-                if files and msg.video:
-                    # запоминаем, чтобы дальше не загружать файл заново
-                    set_setting("welcome_video_cache", msg.video.file_id)
                 return
         except Exception as e:
             log.warning("welcome video: %s", e)
-            if not files and "file" in str(e).lower():
-                set_setting(key, None)   # file_id испорчен — в следующий раз загрузим стандартный файл заново
+            if override and "file" in str(e).lower():
+                set_setting("welcome_video", None)   # видео от админа испорчено — вернём стандартный ролик
         finally:
             for f in files:
                 f.close()
