@@ -680,22 +680,41 @@ async def billing_loop(bot):
         await asyncio.sleep(600)  # каждые 10 минут
 
 
+MSK = timedelta(hours=3)
+CHARGE_FROM_HOUR, CHARGE_TO_HOUR = 10, 22   # автосписания только с 10:00 до 22:00 МСК (п. 2.4 оферты)
+NOTICE_MARGIN = timedelta(hours=1)          # запас, чтобы напоминание точно пришло раньше 24 ч / 3 дней
+
+
+def charge_window_open(now):
+    return CHARGE_FROM_HOUR <= (now + MSK).hour < CHARGE_TO_HOUR
+
+
+def charge_time(paid_until):
+    """Когда реально пройдёт списание: в момент окончания периода, но не раньше 10:00 и не позже 22:00 МСК."""
+    msk = paid_until + MSK
+    if msk.hour < CHARGE_FROM_HOUR:
+        msk = msk.replace(hour=CHARGE_FROM_HOUR, minute=0, second=0, microsecond=0)
+    elif msk.hour >= CHARGE_TO_HOUR:
+        msk = (msk + timedelta(days=1)).replace(hour=CHARGE_FROM_HOUR, minute=0, second=0, microsecond=0)
+    return msk - MSK
+
+
 async def billing_tick(bot):
     now = now_utc()
 
-    # 1. Напоминание до окончания периода: за сутки (месяц) или за 3 дня (год)
+    # 1. Напоминание до окончания периода: не позднее чем за сутки (месяц) или за 3 дня (год)
     rows = db(
         "SELECT user_id, paid_until, auto_renew AND first_inv_id IS NOT NULL FROM subscriptions "
         "WHERE status = 'active' AND paid_until > %s AND paid_until <= %s "
         "AND COALESCE(provider, 'rk') <> 'lava' "
         "AND (reminded_for IS NULL OR reminded_for <> paid_until)",
-        (now, now + timedelta(days=3)), fetch="all",
+        (now, now + timedelta(days=3) + NOTICE_MARGIN), fetch="all",
     )
     for user_id, paid_until, auto in rows:
         sub = get_sub(user_id)
         price, days = sub_terms(sub)
-        notice_days = 3 if days >= 365 else 1
-        if paid_until > now + timedelta(days=notice_days):
+        notice = timedelta(days=3 if days >= 365 else 1) + NOTICE_MARGIN
+        if paid_until > now + notice:
             continue  # для месячной подписки ещё рано
         db("UPDATE subscriptions SET reminded_for = paid_until WHERE user_id = %s", (user_id,))
         if user_id == ADMIN_ID:
@@ -705,7 +724,7 @@ async def billing_tick(bot):
             if auto:
                 await bot.send_message(
                     user_id,
-                    f"🔔 {fmt_date(paid_until)} подписка на Клуб «СВОИ» продлится автоматически: "
+                    f"🔔 {fmt_date(charge_time(paid_until))} подписка на Клуб «СВОИ» продлится автоматически: "
                     f"спишется {rub(price)} ₽ за {period}.\n\n"
                     "Отключить автопродление можно в разделе «👤 Моя подписка» (/start).",
                 )
@@ -734,13 +753,14 @@ async def billing_tick(bot):
         except Exception as e:
             log.warning("reminder %s: %s", user_id, e)
 
-    # 2. Автосписание, когда период закончился
+    # 2. Автосписание, когда период закончился — только с 10:00 до 22:00 МСК (ночью ждём утра;
+    #    доступ при этом не закрывается: закрытие ждёт сутки после окончания периода, см. шаг 3)
     rows = db(
         "SELECT user_id, first_inv_id FROM subscriptions WHERE status = 'active' AND auto_renew "
         "AND first_inv_id IS NOT NULL AND paid_until <= %s "
         "AND (last_charge_at IS NULL OR last_charge_at < paid_until)",
         (now,), fetch="all",
-    )
+    ) if charge_window_open(now) else []
     for user_id, first_inv_id in rows:
         db("UPDATE subscriptions SET last_charge_at = %s WHERE user_id = %s", (now, user_id))
         if RK_TEST:
@@ -818,7 +838,8 @@ PAYMENT_TEXT = f"""💳 <b>Тарифы клуба «СВОИ»</b>
 📅 <b>Месяц</b> — {rub(TARIFFS['m']['price'])} ₽ (${TARIFFS['m']['usd']})
 🗓 <b>Год</b> — {rub(TARIFFS['y']['price'])} ₽ (${TARIFFS['y']['usd']}) — выгода {rub(_SAVE_RUB)} ₽ (${_SAVE_USD})
 
-Подписка продлевается автоматически, отключить можно в любой момент.
+Картой РФ / РБ — с автопродлением, отключить можно в любой момент.
+{"Картой не РФ — тоже с автопродлением (через Lava)." if LAVA_NEW_SALES else "Картой не РФ — разовая оплата за выбранный срок."}
 
 <i>Нажимая кнопку оплаты, вы принимаете условия <a href="{OFFER_URL}">публичной оферты</a>.</i>
 
@@ -831,6 +852,7 @@ def pay_foreign_text(tariff):
     """Ручная оплата картой не РФ (если Lava не подключена)."""
     t = TARIFFS[tariff]
     return f"""🌍 <b>Оплата картой не РФ — ${t['usd']} / {t['name']}</b>
+Разовый платёж за {t['days']} дней, без автопродления.
 
 Freedom bank: <code>4002890062233725</code>
 (нажмите на номер, чтобы скопировать)
