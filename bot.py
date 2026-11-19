@@ -829,7 +829,7 @@ WELCOME_TEXT = """<b>Ты в одном шаге от входа в клуб «�
     y=rub(TARIFFS["y"]["price"]), yu=TARIFFS["y"]["usd"],
 )
 
-OFFER_URL = "https://telegra.ph/Publichnaya-oferta--Klub-SVOI-09-24"
+OFFER_URL = "https://telegra.ph/Publichnaya-oferta--Klub-SVOI-11-19"  # редакция от 19.11.2026
 
 _SAVE_RUB, _SAVE_USD = year_saving()
 
