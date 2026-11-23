@@ -17,7 +17,7 @@ from telegram.ext import (
 )
 
 # ===== НАСТРОЙКИ =====
-BOT_VERSION = "2026-11-19 · анимация в /start"  # видно в /help — так понятно, что обновление дошло
+BOT_VERSION = "2026-11-23 · подарок дней через /grant"  # видно в /help — так понятно, что обновление дошло
 TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = 1546392669
 CONTACT = "vm_N17"  # Служба заботы (без @)
@@ -1345,6 +1345,7 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Используй: /grant ID дней\nПример: /grant 123456789 30 (месяц) или 365 (год)")
         return
     sub = get_sub(user_id)
+    was_active = bool(sub and sub["status"] == "active")
     has_tariff = bool(sub and (sub.get("first_inv_id") or sub.get("price")))
     if has_tariff:
         # подарок дней тому, кто платил картой (с автосписанием или без): тариф и автопродление не трогаем
@@ -1352,10 +1353,31 @@ async def grant_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         paid_until = extend_subscription(user_id, days=days, auto_renew=False, period_days=days)
     try:
-        await grant_access(context.bot, user_id, paid_until, first_payment=True)
-        await update.message.reply_text(f"✅ Доступ выдан до {fmt_date(paid_until)}, ссылка отправлена.")
+        if was_active:
+            # человек уже в клубе — это подарок/продление, ссылка-приглашение не нужна
+            await context.bot.send_message(
+                user_id,
+                f"🎁 <b>Вам добавлено {days} {plural_days(days)} в подарок!</b>\n\n"
+                f"Подписка на Клуб «СВОИ» активна до <b>{fmt_date(paid_until)}</b>.",
+                parse_mode="HTML",
+            )
+            await update.message.reply_text(
+                f"🎁 Добавил {days} {plural_days(days)}, подписка до {fmt_date(paid_until)}. Человеку пришло сообщение о подарке.")
+        else:
+            await grant_access(context.bot, user_id, paid_until, first_payment=True)
+            await update.message.reply_text(f"✅ Доступ выдан до {fmt_date(paid_until)}, ссылка отправлена.")
     except Exception as e:
         await update.message.reply_text(f"Подписка записана до {fmt_date(paid_until)}, но сообщение не ушло: {e}")
+
+
+def plural_days(n):
+    """1 день, 2 дня, 5 дней, 21 день, 30 дней"""
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        return "день"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return "дня"
+    return "дней"
 
 
 async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
